@@ -17,20 +17,19 @@
 #------------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.10)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum OS X deployment version")
 
-include(Version)
 project(bcos-gateway VERSION ${VERSION})
 
-find_package(OpenSSL REQUIRED)
-find_package(tarscpp CONFIG REQUIRED)
 find_package(jsoncpp CONFIG REQUIRED)
+find_package(Boost REQUIRED COMPONENTS filesystem)
 
 file(GLOB_RECURSE SRCS bcos-gateway/*.cpp)
 
+find_package(tarscpp REQUIRED)
+
 add_library(${GATEWAY_TARGET} ${SRCS})
-target_link_libraries(${GATEWAY_TARGET} PUBLIC ${PROTOCOL_TARGET} jsoncpp_lib_static OpenSSL::SSL OpenSSL::Crypto ${TARS_PROTOCOL_TARGET})
-target_compile_options(${GATEWAY_TARGET} PRIVATE -Wno-error -Wno-unused-variable)
+target_link_libraries(${GATEWAY_TARGET} PUBLIC jsoncpp_static Boost::filesystem bcos-boostssl ${FRONT_TARGET} ${TARS_PROTOCOL_TARGET} tarscpp::tarsservant tarscpp::tarsutil)
+set_target_properties(${GATEWAY_TARGET} PROPERTIES UNITY_BUILD "ON")
 
 if (APPLE)
 # target_compile_options(${GATEWAY_TARGET} PRIVATE -faligned-allocation)
@@ -47,7 +46,7 @@ endif()
 # include(BuildDocs)
 
 # for code coverage
-if (COVERAGE)
-    include(Coverage)
-    config_coverage("gateway-coverage" "'/usr*' '${CMAKE_CURRENT_SOURCE_DIR}/bcos-cmake-scripts*' '${CMAKE_SOURCE_DIR}/test/mock**' '${CMAKE_SOURCE_DIR}/test/main**'")
-endif ()
+#if (COVERAGE)
+#    include(Coverage)
+#    config_coverage("gateway-coverage" "'/usr*' '${CMAKE_CURRENT_SOURCE_DIR}/bcos-cmake-scripts*' '${CMAKE_SOURCE_DIR}/test/mock**' '${CMAKE_SOURCE_DIR}/test/main**'")
+#endif ()

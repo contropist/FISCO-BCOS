@@ -19,13 +19,12 @@
  * @date 2021-04-22
  */
 #pragma once
-#include "../framework/ConsensusEngineInterface.h"
 #include "Common.h"
+#include "bcos-framework/consensus/ConsensusEngineInterface.h"
 #include <bcos-utilities/Worker.h>
 
-namespace bcos
-{
-namespace consensus
+
+namespace bcos::consensus
 {
 class ConsensusEngine : public virtual ConsensusEngineInterface, public Worker
 {
@@ -48,7 +47,7 @@ public:
 
     void stop() override
     {
-        if (m_started == false)
+        if (!m_started)
         {
             return;
         }
@@ -75,7 +74,7 @@ public:
             catch (std::exception const& _e)
             {
                 CONSENSUS_LOG(ERROR) << LOG_DESC("Process consensus task exception")
-                                     << LOG_KV("error", boost::diagnostic_information(_e));
+                                     << LOG_KV("message", boost::diagnostic_information(_e));
             }
         }
     }
@@ -83,5 +82,4 @@ public:
 protected:
     std::atomic_bool m_started = {false};
 };
-}  // namespace consensus
-}  // namespace bcos
+}  // namespace bcos::consensus

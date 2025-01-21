@@ -21,52 +21,23 @@
 #pragma once
 #include "../executive/BlockContext.h"
 #include "../vm/Precompiled.h"
-#include "Common.h"
-#include <bcos-framework/interfaces/storage/Common.h>
-#include <bcos-framework/interfaces/storage/Table.h>
-#include <bcos-tool/ConsensusNode.h>
-#include <boost/core/ignore_unused.hpp>
 
-namespace bcos
-{
-namespace precompiled
+namespace bcos::precompiled
 {
 class ConsensusPrecompiled : public bcos::precompiled::Precompiled
 {
-#if 0
-contract ConsensusSystemTable
-{
-    function addSealer(string nodeID) public returns(int256);
-    function addObserver(string nodeID) public returns(int256);
-    function remove(string nodeID) public returns(int256);
-}
-#endif
 public:
     using Ptr = std::shared_ptr<ConsensusPrecompiled>;
-    ConsensusPrecompiled(crypto::Hash::Ptr _hashImpl);
-    virtual ~ConsensusPrecompiled(){};
+    ConsensusPrecompiled(const ConsensusPrecompiled&) = default;
+    ConsensusPrecompiled(ConsensusPrecompiled&&) = default;
+    ConsensusPrecompiled& operator=(const ConsensusPrecompiled&) = default;
+    ConsensusPrecompiled& operator=(ConsensusPrecompiled&&) = default;
+
+    explicit ConsensusPrecompiled(crypto::Hash::Ptr _hashImpl);
+    ~ConsensusPrecompiled() override = default;
 
     std::shared_ptr<PrecompiledExecResult> call(
-        std::shared_ptr<executor::TransactionExecutive> _executive, bytesConstRef _param,
-        const std::string& _origin, const std::string& _sender, int64_t gasLeft) override;
-
-private:
-    int addSealer(const std::shared_ptr<executor::TransactionExecutive>& _executive,
-        bytesConstRef& _data, const PrecompiledCodec& codec);
-
-    int addObserver(const std::shared_ptr<executor::TransactionExecutive>& _executive,
-        bytesConstRef& _data, const PrecompiledCodec& codec);
-
-    int removeNode(const std::shared_ptr<executor::TransactionExecutive>& _executive,
-        bytesConstRef& _data, const PrecompiledCodec& codec);
-
-    int setWeight(const std::shared_ptr<executor::TransactionExecutive>& _executive,
-        bytesConstRef& _data, const PrecompiledCodec& codec);
-
-private:
-    void showConsensusTable(const std::shared_ptr<executor::TransactionExecutive>& _executive);
-
-    void checkTable(executor::TransactionExecutive& executive);
+        std::shared_ptr<executor::TransactionExecutive> _executive,
+        PrecompiledExecResult::Ptr _callParameters) override;
 };
-}  // namespace precompiled
-}  // namespace bcos
+}  // namespace bcos::precompiled

@@ -21,14 +21,14 @@
 #pragma once
 #include "../interfaces/PBFTMessageFactory.h"
 #include "../interfaces/PBFTStorage.h"
-#include <bcos-framework/interfaces/dispatcher/SchedulerInterface.h>
-#include <bcos-framework/interfaces/protocol/BlockFactory.h>
-#include <bcos-framework/interfaces/storage/KVStorageHelper.h>
+#include <bcos-framework/dispatcher/SchedulerInterface.h>
+#include <bcos-framework/protocol/BlockFactory.h>
+#include <bcos-framework/storage/KVStorageHelper.h>
 #include <bcos-utilities/ThreadPool.h>
 
-namespace bcos
-{
-namespace consensus
+#include <utility>
+
+namespace bcos::consensus
 {
 class LedgerStorage : public PBFTStorage, public std::enable_shared_from_this<LedgerStorage>
 {
@@ -37,15 +37,22 @@ public:
     LedgerStorage(bcos::scheduler::SchedulerInterface::Ptr _scheduler,
         std::shared_ptr<bcos::storage::KVStorageHelper> _storage,
         bcos::protocol::BlockFactory::Ptr _blockFactory, PBFTMessageFactory::Ptr _messageFactory)
-      : m_scheduler(_scheduler),
-        m_storage(_storage),
-        m_blockFactory(_blockFactory),
-        m_messageFactory(_messageFactory)
+      : m_scheduler(std::move(_scheduler)),
+        m_storage(std::move(_storage)),
+        m_blockFactory(std::move(_blockFactory)),
+        m_messageFactory(std::move(_messageFactory))
     {
         createKVTable(m_pbftCommitDB);
         m_commitBlockWorker = std::make_shared<ThreadPool>("blockSubmit", 1);
     }
-
+    ~LedgerStorage() override { stop(); }
+    void stop() override
+    {
+        if (m_commitBlockWorker)
+        {
+            m_commitBlockWorker->stop();
+        }
+    }
     void createKVTable(std::string const& _dbName);
     PBFTProposalListPtr loadState(bcos::protocol::BlockNumber _stabledIndex) override;
 
@@ -57,8 +64,15 @@ public:
         std::function<void(bcos::ledger::LedgerConfig::Ptr, bool _syncBlock)> _finalizeHandler)
         override
     {
-        m_finalizeHandler = _finalizeHandler;
+        m_finalizeHandler = std::move(_finalizeHandler);
     }
+    void registerOnStableCheckPointCommitFailed(
+        std::function<void(bcos::Error::Ptr&&, PBFTProposalInterface::Ptr)>
+            _onStableCheckPointCommitFailed) override
+    {
+        m_onStableCheckPointCommitFailed = std::move(_onStableCheckPointCommitFailed);
+    }
+
     void asyncGetCommittedProposals(bcos::protocol::BlockNumber _start, size_t _offset,
         std::function<void(PBFTProposalListPtr)> _onSuccess) override;
 
@@ -73,7 +87,7 @@ protected:
 
     virtual void asyncRemove(std::string const& _dbName, std::string const& _key);
 
-    virtual void commitStableCheckPoint(
+    virtual void commitStableCheckPoint(PBFTProposalInterface::Ptr _stableProposal,
         bcos::protocol::BlockHeader::Ptr _blockHeader, bcos::protocol::Block::Ptr _blockInfo);
     virtual void asyncGetLatestCommittedProposalIndex();
 
@@ -81,7 +95,6 @@ protected:
         bcos::protocol::BlockHeader::Ptr _blockHeader,
         bcos::ledger::LedgerConfig::Ptr _ledgerConfig);
 
-protected:
     bcos::scheduler::SchedulerInterface::Ptr m_scheduler;
     std::shared_ptr<bcos::storage::KVStorageHelper> m_storage;
     bcos::protocol::BlockFactory::Ptr m_blockFactory;
@@ -102,8 +115,8 @@ protected:
     boost::condition_variable m_signalled;
     boost::mutex x_signalled;
     std::function<void(bcos::ledger::LedgerConfig::Ptr, bool _syncBlock)> m_finalizeHandler;
-
+    std::function<void(bcos::Error::Ptr&&, PBFTProposalInterface::Ptr)>
+        m_onStableCheckPointCommitFailed;
     std::shared_ptr<ThreadPool> m_commitBlockWorker;
 };
-}  // namespace consensus
-}  // namespace bcos
+}  // namespace bcos::consensus

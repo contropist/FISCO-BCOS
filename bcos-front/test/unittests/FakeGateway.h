@@ -21,18 +21,14 @@
 
 #pragma once
 
-#include <bcos-framework/interfaces/front/FrontServiceInterface.h>
-#include <bcos-framework/interfaces/gateway/GatewayInterface.h>
+#include <bcos-framework/front/FrontServiceInterface.h>
+#include <bcos-framework/gateway/GatewayInterface.h>
 #include <bcos-utilities/Common.h>
 #include <bcos-utilities/ThreadPool.h>
 #include <boost/asio.hpp>
 #include <boost/core/ignore_unused.hpp>
 
-namespace bcos
-{
-namespace front
-{
-namespace test
+namespace bcos::front::test
 {
 class FakeGateway : public gateway::GatewayInterface,
                     public std::enable_shared_from_this<FakeGateway>
@@ -40,14 +36,12 @@ class FakeGateway : public gateway::GatewayInterface,
 public:
     virtual ~FakeGateway() {}
 
-public:
     std::shared_ptr<FrontServiceInterface> m_frontService;
     void setFrontService(std::shared_ptr<FrontServiceInterface> _frontService)
     {
         m_frontService = _frontService;
     }
 
-public:
     /**
      * @brief: start/stop service
      */
@@ -59,55 +53,67 @@ public:
     /**
      * @brief: get nodeIDs from gateway
      * @param _groupID:
-     * @param _getNodeIDsFunc: get nodeIDs callback
+     * @param _onGetGroupNodeInfo: get nodeIDs callback
      * @return void
      */
-    void asyncGetNodeIDs(const std::string& _groupID, GetNodeIDsFunc _getNodeIDsFunc) override
+    void asyncGetGroupNodeInfo(
+        const std::string& _groupID, GetGroupNodeInfoFunc _onGetGroupNodeInfo) override
     {
-        boost::ignore_unused(_groupID, _getNodeIDsFunc);
+        boost::ignore_unused(_groupID, _onGetGroupNodeInfo);
     }
 
     /**
      * @brief: send message to a single node
      * @param _groupID: groupID
+     * @param _moduleID: moduleID
      * @param _srcNodeID: the sender nodeID
      * @param _dstNodeID: the receiver nodeID
      * @param _payload: message content
      * @return void
      */
-    void asyncSendMessageByNodeID(const std::string& _groupID, bcos::crypto::NodeIDPtr _srcNodeID,
-        bcos::crypto::NodeIDPtr _dstNodeID, bytesConstRef _payload,
-        bcos::gateway::ErrorRespFunc _errorRespFunc) override;
+    void asyncSendMessageByNodeID(const std::string& _groupID, int _moduleID,
+        bcos::crypto::NodeIDPtr _srcNodeID, bcos::crypto::NodeIDPtr _dstNodeID,
+        bytesConstRef _payload, bcos::gateway::ErrorRespFunc _errorRespFunc) override;
 
     /**
      * @brief: send message to multiple nodes
      * @param _groupID: groupID
+     * @param _moduleID: moduleID
      * @param _srcNodeID: the sender nodeID
      * @param _nodeIDs: the receiver nodeIDs
      * @param _payload: message content
      * @return void
      */
-    void asyncSendMessageByNodeIDs(const std::string& _groupID, bcos::crypto::NodeIDPtr _srcNodeID,
-        const bcos::crypto::NodeIDs& _dstNodeIDs, bytesConstRef _payload) override;
+    void asyncSendMessageByNodeIDs(const std::string& _groupID, int _moduleID,
+        bcos::crypto::NodeIDPtr _srcNodeID, const bcos::crypto::NodeIDs& _dstNodeIDs,
+        bytesConstRef _payload) override;
 
     /**
      * @brief: send message to all nodes
+     * @param _nodeType: nodeType
      * @param _groupID: groupID
+     * @param _moduleID: moduleID
      * @param _srcNodeID: the sender nodeID
      * @param _payload: message content
      * @return void
      */
-    void asyncSendBroadcastMessage(uint16_t, const std::string& _groupID,
+    void asyncSendBroadcastMessage(uint16_t _nodeType, const std::string& _groupID, int _moduleID,
         bcos::crypto::NodeIDPtr _srcNodeID, bytesConstRef _payload) override;
+
+    task::Task<void> broadcastMessage(uint16_t type, std::string_view groupID, int moduleID,
+        const bcos::crypto::NodeID& srcNodeID, ::ranges::any_view<bytesConstRef> payloads) override
+    {
+        co_return;
+    };
 
     void asyncNotifyGroupInfo(
         bcos::group::GroupInfo::Ptr, std::function<void(Error::Ptr&&)>) override
     {}
 
     void asyncSendMessageByTopic(const std::string&, bcos::bytesConstRef,
-        std::function<void(bcos::Error::Ptr&&, int16_t, bytesPointer)>) override
+        std::function<void(bcos::Error::Ptr&&, int16_t, bytesConstRef)>) override
     {}
-    void asyncSendBroadbastMessageByTopic(const std::string&, bcos::bytesConstRef) override {}
+    void asyncSendBroadcastMessageByTopic(const std::string&, bcos::bytesConstRef) override {}
 
     void asyncSubscribeTopic(
         std::string const&, std::string const&, std::function<void(Error::Ptr&&)>) override
@@ -117,6 +123,4 @@ public:
     {}
 };
 
-}  // namespace test
-}  // namespace front
-}  // namespace bcos
+}  // namespace bcos::front::test

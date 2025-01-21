@@ -20,12 +20,12 @@
 #pragma once
 #include "Common.h"
 #include <bcos-crypto/interfaces/crypto/KeyFactory.h>
+#include <bcos-framework/protocol/AMOPRequest.h>
 #include <bcos-gateway/libamop/AMOPMessage.h>
 #include <bcos-gateway/libamop/TopicManager.h>
 #include <bcos-gateway/libp2p/P2PInterface.h>
 #include <bcos-gateway/libp2p/P2PMessage.h>
 #include <bcos-gateway/libp2p/P2PSession.h>
-#include <bcos-protocol/amop/AMOPRequest.h>
 #include <bcos-utilities/ThreadPool.h>
 #include <bcos-utilities/Timer.h>
 #include <boost/asio.hpp>
@@ -57,7 +57,7 @@ public:
      * @return void
      */
     virtual void asyncSendMessageByTopic(const std::string& _topic, bcos::bytesConstRef _data,
-        std::function<void(bcos::Error::Ptr&&, int16_t, bytesPointer)> _respFunc);
+        std::function<void(bcos::Error::Ptr&&, int16_t, bytesConstRef)> _respFunc);
 
     /**
      * @brief: async send message to all nodes subscribe _topic
@@ -65,7 +65,7 @@ public:
      * @param _data: message data
      * @return void
      */
-    virtual void asyncSendBroadbastMessageByTopic(
+    virtual void asyncSendBroadcastMessageByTopic(
         const std::string& _topic, bcos::bytesConstRef _data);
 
     virtual void onAMOPMessage(bcos::gateway::NetworkException const& _e,
@@ -139,11 +139,10 @@ private:
         std::string const& _topic, bytesConstRef _data,
         std::function<void(bytesPointer, int16_t)> const& _responseCallback);
     void onRecvAMOPResponse(int16_t _type, bytesPointer _responseData,
-        std::function<void(bcos::Error::Ptr&&, int16_t, bytesPointer)> _callback);
+        std::function<void(bcos::Error::Ptr&&, int16_t, bytesConstRef)> _callback);
     bool trySendTopicMessageToLocalClient(const std::string& _topic, bcos::bytesConstRef _data,
-        std::function<void(bcos::Error::Ptr&&, int16_t, bytesPointer)> _respFunc);
+        std::function<void(bcos::Error::Ptr&&, int16_t, bytesConstRef)> _respFunc);
 
-private:
     std::shared_ptr<TopicManager> m_topicManager;
     std::shared_ptr<AMOPMessageFactory> m_messageFactory;
     std::shared_ptr<bcos::protocol::AMOPRequestFactory> m_requestFactory;

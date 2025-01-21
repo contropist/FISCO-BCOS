@@ -22,9 +22,9 @@
 #include "bcos-txpool/sync/TransactionSync.h"
 #include "bcos-txpool/sync/protocol/PB/TxsSyncMsgFactoryImpl.h"
 #include "bcos-txpool/txpool/validator/TxValidator.h"
+#include "bcos-txpool/txpool/validator/Web3NonceChecker.h"
 #include "txpool/storage/MemoryStorage.h"
 #include "txpool/validator/TxPoolNonceChecker.h"
-#include <bcos-tool/LedgerConfigFetcher.h>
 
 using namespace bcos;
 using namespace bcos::txpool;
@@ -35,39 +35,45 @@ using namespace bcos::protocol;
 TxPoolFactory::TxPoolFactory(NodeIDPtr _nodeId, CryptoSuite::Ptr _cryptoSuite,
     TransactionSubmitResultFactory::Ptr _txResultFactory, BlockFactory::Ptr _blockFactory,
     bcos::front::FrontServiceInterface::Ptr _frontService,
-    bcos::ledger::LedgerInterface::Ptr _ledger, std::string const& _groupId,
-    std::string const& _chainId, int64_t _blockLimit)
-  : m_nodeId(_nodeId),
-    m_cryptoSuite(_cryptoSuite),
-    m_txResultFactory(_txResultFactory),
-    m_blockFactory(_blockFactory),
-    m_frontService(_frontService),
-    m_ledger(_ledger),
-    m_groupId(_groupId),
-    m_chainId(_chainId),
-    m_blockLimit(_blockLimit)
+    bcos::ledger::LedgerInterface::Ptr _ledger, std::string _groupId, std::string _chainId,
+    int64_t _blockLimit, size_t _txpoolLimit, bool checkTransactionSignature)
+  : m_nodeId(std::move(_nodeId)),
+    m_cryptoSuite(std::move(_cryptoSuite)),
+    m_txResultFactory(std::move(_txResultFactory)),
+    m_blockFactory(std::move(_blockFactory)),
+    m_frontService(std::move(_frontService)),
+    m_ledger(std::move(_ledger)),
+    m_groupId(std::move(_groupId)),
+    m_chainId(std::move(_chainId)),
+    m_blockLimit(_blockLimit),
+    m_txpoolLimit(_txpoolLimit),
+    m_checkTransactionSignature(checkTransactionSignature)
 {}
 
 
-TxPool::Ptr TxPoolFactory::createTxPool(size_t _notifyWorkerNum, size_t _verifierWorkerNum)
+TxPool::Ptr TxPoolFactory::createTxPool(
+    size_t _notifyWorkerNum, size_t _verifierWorkerNum, uint64_t _txsExpirationTime)
 {
     TXPOOL_LOG(INFO) << LOG_DESC("create transaction validator");
     auto txpoolNonceChecker = std::make_shared<TxPoolNonceChecker>();
-    auto validator =
-        std::make_shared<TxValidator>(txpoolNonceChecker, m_cryptoSuite, m_groupId, m_chainId);
+    auto web3NonceChecker = std::make_shared<Web3NonceChecker>(m_ledger);
+    auto validator = std::make_shared<TxValidator>(
+        txpoolNonceChecker, std::move(web3NonceChecker), m_cryptoSuite, m_groupId, m_chainId);
 
     TXPOOL_LOG(INFO) << LOG_DESC("create transaction config");
-    auto txpoolConfig = std::make_shared<TxPoolConfig>(
-        validator, m_txResultFactory, m_blockFactory, m_ledger, txpoolNonceChecker, m_blockLimit);
+    auto txpoolConfig = std::make_shared<TxPoolConfig>(validator, m_txResultFactory, m_blockFactory,
+        m_ledger, txpoolNonceChecker, m_blockLimit, m_txpoolLimit, m_checkTransactionSignature);
+
     TXPOOL_LOG(INFO) << LOG_DESC("create transaction storage");
-    auto txpoolStorage = std::make_shared<MemoryStorage>(txpoolConfig, _notifyWorkerNum);
+    auto txpoolStorage =
+        std::make_shared<MemoryStorage>(txpoolConfig, _notifyWorkerNum, _txsExpirationTime);
 
     auto syncMsgFactory = std::make_shared<TxsSyncMsgFactoryImpl>();
     TXPOOL_LOG(INFO) << LOG_DESC("create sync config");
     auto txsSyncConfig = std::make_shared<TransactionSyncConfig>(
         m_nodeId, m_frontService, txpoolStorage, syncMsgFactory, m_blockFactory, m_ledger);
     TXPOOL_LOG(INFO) << LOG_DESC("create sync engine");
-    auto txsSync = std::make_shared<TransactionSync>(txsSyncConfig);
+    auto txsSync = std::make_shared<TransactionSync>(txsSyncConfig, m_checkTransactionSignature);
 
     TXPOOL_LOG(INFO) << LOG_DESC("create txpool") << LOG_KV("submitWorkerNum", _verifierWorkerNum)
                      << LOG_KV("notifyWorkerNum", _notifyWorkerNum);

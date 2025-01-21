@@ -1,9 +1,11 @@
 #pragma once
 
-#include "bcos-framework/interfaces/ledger/LedgerInterface.h"
-#include "bcos-framework/interfaces/storage/StorageInterface.h"
+#include "bcos-framework/ledger/LedgerInterface.h"
+#include "bcos-framework/protocol/ProtocolTypeDef.h"
+#include "bcos-framework/storage/StorageInterface.h"
 #include "bcos-table/src/StateStorage.h"
 
+using namespace bcos::protocol;
 namespace bcos::test
 {
 #pragma GCC diagnostic push
@@ -28,8 +30,9 @@ public:
     }
 
     void asyncGetRows(std::string_view table,
-        const std::variant<const gsl::span<std::string_view const>,
-            const gsl::span<std::string const>>& _keys,
+        RANGES::any_view<std::string_view,
+            RANGES::category::input | RANGES::category::random_access | RANGES::category::sized>
+            keys,
         std::function<void(Error::UniquePtr, std::vector<std::optional<storage::Entry>>)>
             _callback) noexcept override
     {
@@ -54,7 +57,7 @@ public:
             return;
         }
 
-        m_storage->asyncGetRows(table, _keys, std::move(_callback));
+        m_storage->asyncGetRows(table, keys, std::move(_callback));
     }
 
     void asyncSetRow(std::string_view table, std::string_view key, storage::Entry entry,
@@ -63,20 +66,21 @@ public:
         m_storage->asyncSetRow(table, key, std::move(entry), std::move(callback));
     }
 
-    void asyncPrepare(const TwoPCParams& params, const storage::TraverseStorageInterface& storage,
+    void asyncPrepare(const bcos::protocol::TwoPCParams& params,
+        const storage::TraverseStorageInterface& storage,
+        std::function<void(Error::Ptr, uint64_t, const std::string&)> callback) noexcept override
+    {
+        callback(nullptr, 0, "");
+    }
+
+    void asyncCommit(const bcos::protocol::TwoPCParams& params,
         std::function<void(Error::Ptr, uint64_t)> callback) noexcept override
     {
         callback(nullptr, 0);
     }
 
-    void asyncCommit(
-        const TwoPCParams& params, std::function<void(Error::Ptr)> callback) noexcept override
-    {
-        callback(nullptr);
-    }
-
-    void asyncRollback(
-        const TwoPCParams& params, std::function<void(Error::Ptr)> callback) noexcept override
+    void asyncRollback(const bcos::protocol::TwoPCParams& params,
+        std::function<void(Error::Ptr)> callback) noexcept override
     {
         callback(nullptr);
     }

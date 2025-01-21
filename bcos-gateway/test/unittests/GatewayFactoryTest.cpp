@@ -41,7 +41,7 @@ BOOST_AUTO_TEST_CASE(test_certPubHexHandler)
         std::string pubHex;
         auto r = factory->certPubHexHandler()(cert, pubHex);
         BOOST_CHECK(r);
-        BOOST_CHECK_EQUAL(pubHex,
+        BOOST_CHECK_EQUAL(boost::to_lower_copy(pubHex),
             R"(045a0d065954bbc96dba0e9eea163d970a9187c3e5f1a6329daf2898acb888ac2d668f4e3b34b538dcd1be7839d86a0869ca6478913cfd4e46c1517586f9c0b3c0)");
     }
 
@@ -63,8 +63,18 @@ BOOST_AUTO_TEST_CASE(test_buildSSLContext)
         std::string configIni("../../../bcos-gateway/test/unittests/data/config/config_ipv6.ini");
         auto config = std::make_shared<GatewayConfig>();
         config->initConfig(configIni);
-        auto context = factory->buildSSLContext(config->smCertConfig());
-        BOOST_CHECK(context);
+
+        {
+            auto context =
+                factory->buildSSLContext(true, config->sslServerMode(), config->smCertConfig());
+            BOOST_CHECK(context);
+        }
+
+        {
+            auto context =
+                factory->buildSSLContext(false, config->sslClientMode(), config->smCertConfig());
+            BOOST_CHECK(context);
+        }
     }
 
     {
@@ -72,8 +82,18 @@ BOOST_AUTO_TEST_CASE(test_buildSSLContext)
         std::string configIni("../../../bcos-gateway/test/unittests/data/config/config_ipv4.ini");
         auto config = std::make_shared<GatewayConfig>();
         config->initConfig(configIni);
-        auto context = factory->buildSSLContext(config->certConfig());
-        BOOST_CHECK(context);
+
+        {
+            auto context =
+                factory->buildSSLContext(true, config->sslServerMode(), config->certConfig());
+            BOOST_CHECK(context);
+        }
+
+        {
+            auto context =
+                factory->buildSSLContext(false, config->sslClientMode(), config->certConfig());
+            BOOST_CHECK(context);
+        }
     }
 }
 

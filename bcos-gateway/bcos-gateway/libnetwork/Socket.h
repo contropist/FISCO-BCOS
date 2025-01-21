@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "bcos-utilities/BoostLog.h"
 #include <bcos-gateway/libnetwork/Common.h>
 #include <bcos-gateway/libnetwork/SocketFace.h>
 #include <boost/asio.hpp>
@@ -13,21 +14,20 @@
 #include <boost/beast.hpp>
 #include <boost/filesystem.hpp>
 
-namespace bcos
-{
-namespace gateway
+
+namespace bcos::gateway
 {
 class Socket : public SocketFace, public std::enable_shared_from_this<Socket>
 {
 public:
-    Socket(
-        ba::io_service& _ioService, ba::ssl::context& _sslContext, NodeIPEndpoint _nodeIPEndpoint)
-      : m_nodeIPEndpoint(_nodeIPEndpoint)
+    Socket(std::shared_ptr<ba::io_context> _ioService, ba::ssl::context& _sslContext,
+        NodeIPEndpoint _nodeIPEndpoint)
+      : m_nodeIPEndpoint(_nodeIPEndpoint), m_ioService(_ioService)
     {
         try
         {
             m_sslSocket =
-                std::make_shared<ba::ssl::stream<bi::tcp::socket>>(_ioService, _sslContext);
+                std::make_shared<ba::ssl::stream<bi::tcp::socket>>(*_ioService, _sslContext);
         }
         catch (const std::exception& _e)
         {
@@ -49,8 +49,7 @@ public:
                 m_sslSocket->lowest_layer().close();
         }
         catch (...)
-        {
-        }
+        {}
     }
 
     bi::tcp::endpoint remoteEndpoint(
@@ -74,10 +73,12 @@ public:
         m_nodeIPEndpoint = _nodeIPEndpoint;
     }
 
+    ba::io_context& ioService() override { return *m_ioService; }
+
 protected:
     NodeIPEndpoint m_nodeIPEndpoint;
+    std::shared_ptr<ba::io_context> m_ioService;
     std::shared_ptr<ba::ssl::stream<bi::tcp::socket>> m_sslSocket;
 };
 
-}  // namespace gateway
-}  // namespace bcos
+}  // namespace bcos::gateway

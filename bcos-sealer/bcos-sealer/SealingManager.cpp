@@ -18,6 +18,9 @@
  * @date: 2021-05-14
  */
 #include "SealingManager.h"
+#include "Common.h"
+#include "Sealer.h"
+
 using namespace bcos;
 using namespace bcos::sealer;
 using namespace bcos::crypto;
@@ -33,14 +36,14 @@ void SealingManager::resetSealing()
 }
 
 void SealingManager::appendTransactions(
-    std::shared_ptr<TxsMetaDataQueue> _txsQueue, Block::Ptr _fetchedTxs)
+    TxsMetaDataQueue& _txsQueue, bcos::protocol::Block const& _fetchedTxs)
 {
-    WriteGuard l(x_pendingTxs);
+    WriteGuard lock(x_pendingTxs);
     // append the system transactions
-    for (size_t i = 0; i < _fetchedTxs->transactionsMetaDataSize(); i++)
+    for (size_t i = 0; i < _fetchedTxs.transactionsMetaDataSize(); i++)
     {
-        _txsQueue->emplace_back(
-            std::const_pointer_cast<TransactionMetaData>(_fetchedTxs->transactionMetaData(i)));
+        _txsQueue.emplace_back(
+            std::const_pointer_cast<TransactionMetaData>(_fetchedTxs.transactionMetaData(i)));
     }
     m_onReady();
 }
@@ -53,23 +56,19 @@ bool SealingManager::shouldGenerateProposal()
         return false;
     }
     // should wait the given block submit to the ledger
-    if (m_currentNumber < m_waitUntil)
+    if (m_latestNumber < m_waitUntil)
     {
         return false;
     }
     // check the txs size
     auto txsSize = pendingTxsSize();
-    if (txsSize >= m_maxTxsPerBlock || reachMinSealTimeCondition())
-    {
-        return true;
-    }
-    return false;
+    return (txsSize >= m_maxTxsPerBlock) || reachMinSealTimeCondition();
 }
 
 void SealingManager::clearPendingTxs()
 {
-    UpgradableGuard l(x_pendingTxs);
-    auto pendingTxsSize = m_pendingTxs->size() + m_pendingSysTxs->size();
+    UpgradableGuard lock(x_pendingTxs);
+    auto pendingTxsSize = m_pendingTxs.size() + m_pendingSysTxs.size();
     if (pendingTxsSize == 0)
     {
         return;
@@ -77,41 +76,27 @@ void SealingManager::clearPendingTxs()
     // return the txs back to the txpool
     SEAL_LOG(INFO) << LOG_DESC("clearPendingTxs: return back the unhandled transactions")
                    << LOG_KV("size", pendingTxsSize);
-    HashListPtr unHandledTxs = std::make_shared<HashList>();
-    for (auto txMetaData : *m_pendingTxs)
+    auto unHandledTxs =
+        ::ranges::views::concat(m_pendingTxs, m_pendingSysTxs) |
+        ::ranges::views::transform([](auto& transaction) { return transaction->hash(); }) |
+        ::ranges::to<std::vector>();
+    try
     {
-        unHandledTxs->emplace_back(txMetaData->hash());
+        notifyResetTxsFlag(unHandledTxs, false);
     }
-    for (auto txMetaData : *m_pendingSysTxs)
+    catch (std::exception const& e)
     {
-        unHandledTxs->emplace_back(txMetaData->hash());
+        SEAL_LOG(WARNING) << LOG_DESC("clearPendingTxs: return back the unhandled txs exception")
+                          << LOG_KV("message", boost::diagnostic_information(e));
     }
-    auto self = std::weak_ptr<SealingManager>(shared_from_this());
-    m_worker->enqueue([self, unHandledTxs]() {
-        try
-        {
-            auto sealerMgr = self.lock();
-            if (!sealerMgr)
-            {
-                return;
-            }
-            sealerMgr->notifyResetTxsFlag(unHandledTxs, false);
-        }
-        catch (std::exception const& e)
-        {
-            SEAL_LOG(WARNING)
-                << LOG_DESC("shouldGenerateProposal: return back the unhandled txs exception")
-                << LOG_KV("error", boost::diagnostic_information(e));
-        }
-    });
-    UpgradeGuard ul(l);
-    m_pendingTxs->clear();
-    m_pendingSysTxs->clear();
+    UpgradeGuard ul(lock);
+    m_pendingTxs.clear();
+    m_pendingSysTxs.clear();
 }
 
-void SealingManager::notifyResetTxsFlag(HashListPtr _txsHashList, bool _flag, size_t _retryTime)
+void SealingManager::notifyResetTxsFlag(const HashList& _txsHashList, bool _flag, size_t _retryTime)
 {
-    m_config->txpool()->asyncMarkTxs(_txsHashList, _flag, 0, HashType(),
+    m_config->txpool()->asyncMarkTxs(_txsHashList, _flag, -1, HashType(),
         [this, _txsHashList, _flag, _retryTime](Error::Ptr _error) {
             if (_error == nullptr)
             {
@@ -126,51 +111,76 @@ void SealingManager::notifyResetTxsFlag(HashListPtr _txsHashList, bool _flag, si
         });
 }
 
-void SealingManager::notifyResetProposal(bcos::protocol::Block::Ptr _block)
+void SealingManager::notifyResetProposal(bcos::protocol::Block const& _block)
 {
-    auto txsHashList = std::make_shared<HashList>();
-    for (size_t i = 0; i < _block->transactionsHashSize(); i++)
-    {
-        txsHashList->push_back(_block->transactionHash(i));
-    }
+    auto txsHashList = ::ranges::to<std::vector>(_block.transactionHashes());
     notifyResetTxsFlag(txsHashList, false);
 }
 
-std::pair<bool, bcos::protocol::Block::Ptr> SealingManager::generateProposal()
+std::pair<bool, bcos::protocol::Block::Ptr> SealingManager::generateProposal(
+    std::function<uint16_t(bcos::protocol::Block::Ptr)> _handleBlockHook)
 {
     if (!shouldGenerateProposal())
     {
-        return std::pair(false, nullptr);
+        return {false, nullptr};
     }
-    WriteGuard l(x_pendingTxs);
-    m_sealingNumber = std::max(m_sealingNumber.load(), m_currentNumber.load() + 1);
+    WriteGuard writeLock(x_pendingTxs);
+    m_sealingNumber = std::max(m_sealingNumber.load(), m_latestNumber.load() + 1);
     auto block = m_config->blockFactory()->createBlock();
     auto blockHeader = m_config->blockFactory()->blockHeaderFactory()->createBlockHeader();
     blockHeader->setNumber(m_sealingNumber);
-    blockHeader->setTimestamp(utcTime());
+    blockHeader->setTimestamp(m_config->nodeTimeMaintenance()->getAlignedTime());
+    blockHeader->calculateHash(*m_config->blockFactory()->cryptoSuite()->hashImpl());
     block->setBlockHeader(blockHeader);
     auto txsSize =
-        std::min((size_t)m_maxTxsPerBlock, (m_pendingTxs->size() + m_pendingSysTxs->size()));
+        std::min((size_t)m_maxTxsPerBlock, (m_pendingTxs.size() + m_pendingSysTxs.size()));
     // prioritize seal from the system txs list
-    auto systemTxsSize = std::min(txsSize, m_pendingSysTxs->size());
-    if (m_pendingSysTxs->size() > 0)
+    auto systemTxsSize = std::min(txsSize, m_pendingSysTxs.size());
+    if (!m_pendingSysTxs.empty())
     {
         m_waitUntil.store(m_sealingNumber);
         SEAL_LOG(INFO) << LOG_DESC("seal the system transactions")
                        << LOG_KV("sealNextBlockUntil", m_waitUntil)
-                       << LOG_KV("curNum", m_currentNumber);
+                       << LOG_KV("curNum", m_latestNumber);
     }
     bool containSysTxs = false;
+    if (_handleBlockHook)
+    {
+        // put the generated transaction into the 0th position of the block transactions
+        // Note: must set generatedTx into the first transaction for other transactions may change
+        //       the _sys_config_ and _sys_consensus_
+        //       here must use noteChange for this function will notify updating the txsCache
+        auto handleRet = _handleBlockHook(block);
+        if (handleRet == Sealer::SealBlockResult::SUCCESS)
+        {
+            if (block->transactionsMetaDataSize() > 0 || block->transactionsSize() > 0)
+            {
+                containSysTxs = true;
+                if (txsSize == m_maxTxsPerBlock)
+                {
+                    txsSize--;
+                }
+            }
+        }
+        else if (handleRet == Sealer::SealBlockResult::WAIT_FOR_LATEST_BLOCK)
+        {
+            SEAL_LOG(INFO) << LOG_DESC("seal the rotate transactions, but not update latest block")
+                           << LOG_KV("sealNextBlockUntil", m_waitUntil)
+                           << LOG_KV("curNum", m_latestNumber);
+            m_waitUntil.store(m_sealingNumber - 1);
+            return {false, nullptr};
+        }
+    }
     for (size_t i = 0; i < systemTxsSize; i++)
     {
-        block->appendTransactionMetaData(m_pendingSysTxs->front());
-        m_pendingSysTxs->pop_front();
+        block->appendTransactionMetaData(std::move(m_pendingSysTxs.front()));
+        m_pendingSysTxs.pop_front();
         containSysTxs = true;
     }
     for (size_t i = systemTxsSize; i < txsSize; i++)
     {
-        block->appendTransactionMetaData(m_pendingTxs->front());
-        m_pendingTxs->pop_front();
+        block->appendTransactionMetaData(std::move(m_pendingTxs.front()));
+        m_pendingTxs.pop_front();
     }
     m_sealingNumber++;
 
@@ -178,14 +188,24 @@ std::pair<bool, bcos::protocol::Block::Ptr> SealingManager::generateProposal()
     // Note: When the last block(N) sealed by this node contains system transactions,
     //       if other nodes do not wait until block(N) is committed and directly seal block(N+1),
     //       will cause system exceptions.
-    return std::pair(containSysTxs, block);
+    if (c_fileLogLevel == TRACE)
+    {
+        SEAL_LOG(TRACE) << LOG_DESC("generateProposal")
+                        << LOG_KV("txsSize", block->transactionsMetaDataSize())
+                        << LOG_KV("sysTxsSize", systemTxsSize)
+                        << LOG_KV("containSysTxs", containSysTxs)
+                        << LOG_KV("pendingSize", m_pendingTxs.size())
+                        << LOG_KV("pendingSysSize", m_pendingSysTxs.size());
+    }
+    return {containSysTxs, block};
 }
 
 size_t SealingManager::pendingTxsSize()
 {
     ReadGuard l(x_pendingTxs);
-    return m_pendingSysTxs->size() + m_pendingTxs->size();
+    return m_pendingSysTxs.size() + m_pendingTxs.size();
 }
+
 bool SealingManager::reachMinSealTimeCondition()
 {
     auto txsSize = pendingTxsSize();
@@ -194,21 +214,6 @@ bool SealingManager::reachMinSealTimeCondition()
         return false;
     }
     if ((utcSteadyTime() - m_lastSealTime) < m_config->minSealTime())
-    {
-        return false;
-    }
-    return true;
-}
-
-bool SealingManager::shouldFetchTransaction()
-{
-    // fetching transactions currently
-    if (m_fetchingTxs.load() || m_unsealedTxsSize == 0)
-    {
-        return false;
-    }
-    // no need to sealing
-    if (m_sealingNumber < m_startSealingNumber || m_sealingNumber > m_endSealingNumber)
     {
         return false;
     }
@@ -228,22 +233,29 @@ int64_t SealingManager::txsSizeExpectedToFetch()
 
 void SealingManager::fetchTransactions()
 {
-    if (!shouldFetchTransaction())
+    // fetching transactions currently
+    auto lock = std::unique_lock{m_fetchingTxsMutex, std::try_to_lock};
+    if (!lock.owns_lock())
     {
         return;
     }
+    // no need to sealing
+    if (m_sealingNumber < m_startSealingNumber || m_sealingNumber > m_endSealingNumber)
+    {
+        return;
+    }
+
     auto txsToFetch = txsSizeExpectedToFetch();
     if (txsToFetch == 0)
     {
         return;
     }
     // try to fetch transactions
-    m_fetchingTxs = true;
     ssize_t startSealingNumber = m_startSealingNumber;
     ssize_t endSealingNumber = m_endSealingNumber;
-    auto self = std::weak_ptr<SealingManager>(shared_from_this());
     m_config->txpool()->asyncSealTxs(txsToFetch, nullptr,
-        [self, startSealingNumber, endSealingNumber](
+        [self = weak_from_this(), startSealingNumber, endSealingNumber,
+            lock = std::make_shared<decltype(lock)>(std::move(lock))](
             Error::Ptr _error, Block::Ptr _txsHashList, Block::Ptr _sysTxsList) {
             try
             {
@@ -252,27 +264,43 @@ void SealingManager::fetchTransactions()
                 {
                     return;
                 }
+
+                if (_txsHashList->transactionsHashSize() == 0 &&
+                    _sysTxsList->transactionsHashSize() == 0)
+                {
+                    return;
+                }
                 if (_error != nullptr)
                 {
                     SEAL_LOG(WARNING) << LOG_DESC("fetchTransactions exception")
                                       << LOG_KV("returnCode", _error->errorCode())
                                       << LOG_KV("returnMsg", _error->errorMessage());
-                    sealingMgr->m_fetchingTxs = false;
                     return;
                 }
                 bool abort = true;
                 if ((sealingMgr->m_sealingNumber >= startSealingNumber) &&
                     (sealingMgr->m_sealingNumber <= endSealingNumber))
                 {
-                    sealingMgr->appendTransactions(sealingMgr->m_pendingTxs, _txsHashList);
-                    sealingMgr->appendTransactions(sealingMgr->m_pendingSysTxs, _sysTxsList);
+                    sealingMgr->appendTransactions(sealingMgr->m_pendingTxs, *_txsHashList);
+                    sealingMgr->appendTransactions(sealingMgr->m_pendingSysTxs, *_sysTxsList);
                     abort = false;
                 }
-                sealingMgr->m_fetchingTxs = false;
+                else
+                {
+                    SEAL_LOG(INFO) << LOG_DESC("fetchTransactions finish: abort the expired txs")
+                                   << LOG_KV("txsSize", _txsHashList->transactionsMetaDataSize())
+                                   << LOG_KV("sysTxsSize", _sysTxsList->transactionsMetaDataSize());
+                    // Note: should reset the aborted txs
+                    sealingMgr->notifyResetProposal(*_txsHashList);
+                    sealingMgr->notifyResetProposal(*_sysTxsList);
+                }
+
                 sealingMgr->m_onReady();
                 SEAL_LOG(DEBUG) << LOG_DESC("fetchTransactions finish")
                                 << LOG_KV("txsSize", _txsHashList->transactionsMetaDataSize())
                                 << LOG_KV("sysTxsSize", _sysTxsList->transactionsMetaDataSize())
+                                << LOG_KV("pendingSize", sealingMgr->m_pendingTxs.size())
+                                << LOG_KV("pendingSysSize", sealingMgr->m_pendingSysTxs.size())
                                 << LOG_KV("startSealingNumber", startSealingNumber)
                                 << LOG_KV("endSealingNumber", endSealingNumber)
                                 << LOG_KV("sealingNumber", sealingMgr->m_sealingNumber)
@@ -281,7 +309,7 @@ void SealingManager::fetchTransactions()
             catch (std::exception const& e)
             {
                 SEAL_LOG(WARNING) << LOG_DESC("fetchTransactions: onRecv sealed txs failed")
-                                  << LOG_KV("error", boost::diagnostic_information(e))
+                                  << LOG_KV("message", boost::diagnostic_information(e))
                                   << LOG_KV(
                                          "fetchedTxsSize", _txsHashList->transactionsMetaDataSize())
                                   << LOG_KV(
@@ -290,4 +318,57 @@ void SealingManager::fetchTransactions()
                                   << LOG_KV("returnMsg", _error->errorMessage());
             }
         });
+}
+
+bcos::sealer::SealingManager::SealingManager(SealerConfig::Ptr _config)
+  : m_config(std::move(_config))
+{}
+
+void bcos::sealer::SealingManager::resetSealingInfo(
+    ssize_t _startSealingNumber, ssize_t _endSealingNumber, size_t _maxTxsPerBlock)
+{
+    if (_startSealingNumber > _endSealingNumber)
+    {
+        return;
+    }
+    // non-continuous sealing request
+    if (m_sealingNumber > m_endSealingNumber || _startSealingNumber != (m_endSealingNumber + 1))
+    {
+        clearPendingTxs();
+        m_startSealingNumber = _startSealingNumber;
+        m_sealingNumber = _startSealingNumber;
+        m_lastSealTime = utcSteadyTime();
+        // for sys block
+        if (m_waitUntil >= m_startSealingNumber)
+        {
+            SEAL_LOG(INFO) << LOG_DESC("resetSealingInfo: reset waitUntil for reseal");
+            m_waitUntil.store(m_startSealingNumber - 1);
+        }
+    }
+    m_endSealingNumber = _endSealingNumber;
+    m_maxTxsPerBlock = _maxTxsPerBlock;
+    m_onReady();
+    SEAL_LOG(INFO) << LOG_DESC("resetSealingInfo") << LOG_KV("start", m_startSealingNumber)
+                   << LOG_KV("end", m_endSealingNumber) << LOG_KV("sealingNumber", m_sealingNumber)
+                   << LOG_KV("waitUntil", m_waitUntil);
+}
+
+void bcos::sealer::SealingManager::resetLatestNumber(int64_t _latestNumber)
+{
+    m_latestNumber = _latestNumber;
+}
+
+void bcos::sealer::SealingManager::resetLatestHash(crypto::HashType _latestHash)
+{
+    m_latestHash = _latestHash;
+}
+
+int64_t bcos::sealer::SealingManager::latestNumber() const
+{
+    return m_latestNumber;
+}
+
+bcos::crypto::HashType bcos::sealer::SealingManager::latestHash() const
+{
+    return m_latestHash;
 }

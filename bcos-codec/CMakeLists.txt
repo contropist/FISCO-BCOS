@@ -17,20 +17,23 @@
 # ------------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.12)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.3" CACHE STRING "Minimum OS X deployment version")
-include(Version)
 project(bcos-codec VERSION ${VERSION})
 
 file(GLOB SRC_LIST "*.cpp")
 file(GLOB HEADERS "*.h")
 
-aux_source_directory(./abi SRC_LIST)
-include_directories(./abi)
-aux_source_directory(./scale SRC_LIST)
-include_directories(./scale)
+aux_source_directory(bcos-codec/abi SRC_LIST)
+aux_source_directory(bcos-codec/scale SRC_LIST)
+
+find_package(Microsoft.GSL CONFIG REQUIRED)
 
 add_library(${CODEC_TARGET} ${SRC_LIST} ${HEADERS})
-target_link_libraries(${CODEC_TARGET} PUBLIC ${CRYPTO_TARGET})
+target_include_directories(${CODEC_TARGET} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include/bcos-codec>
+)
+target_link_libraries(${CODEC_TARGET} PUBLIC bcos-crypto Microsoft.GSL::GSL)
+set_target_properties(${CODEC_TARGET} PROPERTIES UNITY_BUILD "ON")
 
 if (TESTS)
     enable_testing()
@@ -39,7 +42,11 @@ if (TESTS)
 endif()
 
 # for code coverage
-if (COVERAGE)
-    include(Coverage)
-    config_coverage("cov" "'/usr*' '${CMAKE_CURRENT_SOURCE_DIR}/bcos-cmake-scripts*' '${CMAKE_CURRENT_SOURCE_DIR}/test/bcos-test*'")
-endif ()
+#if (COVERAGE)
+#    include(Coverage)
+#    config_coverage("cov" "'/usr*' '${CMAKE_CURRENT_SOURCE_DIR}/bcos-cmake-scripts*' '${CMAKE_CURRENT_SOURCE_DIR}/test/bcos-test*'")
+#endif ()
+
+include(GNUInstallDirs)
+install(TARGETS ${CODEC_TARGET} EXPORT fiscobcosTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(DIRECTORY "bcos-codec" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")

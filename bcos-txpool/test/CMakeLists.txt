@@ -17,6 +17,7 @@
 # ------------------------------------------------------------------------------
 file(GLOB_RECURSE SOURCES "unittests/*.cpp" "unittests/*.h" "unittests/*.sol")
 file(GLOB_RECURSE DEMO_SOURCES "demo/*.cpp" "demo/*.h" "demo/*.sol")
+include(SearchTestCases)
 
 # cmake settings
 set(TEST_BINARY_NAME test-bcos-txpool)
@@ -26,9 +27,11 @@ add_executable(${TEST_BINARY_NAME} ${SOURCES})
 add_executable(${DEMO_BINARY_NAME} ${DEMO_SOURCES})
 target_include_directories(${TEST_BINARY_NAME} PRIVATE . ${CMAKE_SOURCE_DIR})
 
-find_package(wedpr-crypto CONFIG QUIET REQUIRED)
-find_package(Boost CONFIG QUIET REQUIRED unit_test_framework)
+find_package(Boost REQUIRED unit_test_framework)
 
-target_link_libraries(${TEST_BINARY_NAME} ${TXPOOL_TARGET} ${CRYPTO_TARGET} ${PBPROTOCOL_TARGET} Boost::unit_test_framework)
-target_link_libraries(${DEMO_BINARY_NAME} ${TXPOOL_TARGET} ${CRYPTO_TARGET} ${PBPROTOCOL_TARGET} Boost::unit_test_framework)
-add_test(NAME test-txpool WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} COMMAND ${TEST_BINARY_NAME})
+target_link_libraries(${TEST_BINARY_NAME} ${TXPOOL_TARGET} ${LEDGER_TARGET} bcos-crypto ${TARS_PROTOCOL_TARGET} Boost::unit_test_framework)
+target_link_libraries(${DEMO_BINARY_NAME} ${TXPOOL_TARGET} ${LEDGER_TARGET} bcos-crypto ${TARS_PROTOCOL_TARGET} Boost::unit_test_framework)
+set_source_files_properties("unittests/main/main.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+set_target_properties(${TEST_BINARY_NAME} PROPERTIES UNITY_BUILD "ON")
+#add_test(NAME test-txpool WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} COMMAND ${TEST_BINARY_NAME})
+config_test_cases("" "${SOURCES}" ${TEST_BINARY_NAME} "")

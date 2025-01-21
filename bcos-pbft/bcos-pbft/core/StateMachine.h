@@ -19,34 +19,50 @@
  * @date 2021-05-18
  */
 #pragma once
-#include "../framework/StateMachineInterface.h"
-#include <bcos-framework/interfaces/dispatcher/SchedulerInterface.h>
-#include <bcos-framework/interfaces/protocol/BlockFactory.h>
+#include "bcos-framework/consensus/StateMachineInterface.h"
+#include <bcos-framework/dispatcher/SchedulerInterface.h>
+#include <bcos-framework/protocol/BlockFactory.h>
 #include <bcos-utilities/ThreadPool.h>
 
+#include <utility>
 namespace bcos
 {
 namespace consensus
 {
-class StateMachine : public StateMachineInterface
+class StateMachine : public StateMachineInterface, public std::enable_shared_from_this<StateMachine>
 {
 public:
     StateMachine(bcos::scheduler::SchedulerInterface::Ptr _scheduler,
         bcos::protocol::BlockFactory::Ptr _blockFactory)
-      : m_scheduler(_scheduler), m_blockFactory(_blockFactory)
+      : m_scheduler(std::move(_scheduler)), m_blockFactory(std::move(_blockFactory))
     {
+        // since execute block is serial, only use one thread to decrease the timecost
         m_worker = std::make_shared<ThreadPool>("stateMachine", 1);
     }
-    ~StateMachine() override {}
+
+    ~StateMachine() override { stop(); }
+
+    void stop() override
+    {
+        if (m_worker)
+        {
+            m_worker->stop();
+        }
+    }
 
     void asyncApply(ssize_t _execTimeout, ProposalInterface::ConstPtr _lastAppliedProposal,
         ProposalInterface::Ptr _proposal, ProposalInterface::Ptr _executedProposal,
-        std::function<void(bool)> _onExecuteFinished) override;
+        std::function<void(int64_t)> _onExecuteFinished) override;
+
+    void asyncPreApply(
+        ProposalInterface::Ptr _proposal, std::function<void(bool)> _onPreApplyFinished) override;
 
 private:
     void apply(ssize_t _execTimeout, ProposalInterface::ConstPtr _lastAppliedProposal,
         ProposalInterface::Ptr _proposal, ProposalInterface::Ptr _executedProposal,
-        std::function<void(bool)> _onExecuteFinished);
+        std::function<void(int64_t)> _onExecuteFinished);
+
+    void preApply(ProposalInterface::Ptr _proposal, std::function<void(bool)> _onPreApplyFinished);
 
 protected:
     bcos::scheduler::SchedulerInterface::Ptr m_scheduler;

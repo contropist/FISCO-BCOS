@@ -18,23 +18,38 @@
  * @author: octopus
  * @date: 2021-07-09
  */
-#include <bcos-framework/interfaces/protocol/Transaction.h>
-#include <bcos-framework/interfaces/protocol/TransactionReceipt.h>
-#include <bcos-protocol/LogEntry.h>
+#include "bcos-crypto/ChecksumAddress.h"
+#include "bcos-crypto/interfaces/crypto/CommonType.h"
+#include "bcos-crypto/interfaces/crypto/Hash.h"
+#include "bcos-utilities/BoostLog.h"
+#include "bcos-utilities/Common.h"
+#include <bcos-boostssl/websocket/WsMessage.h>
+#include <bcos-boostssl/websocket/WsService.h>
+#include <bcos-framework/Common.h>
+#include <bcos-framework/protocol/GlobalConfig.h>
+#include <bcos-framework/protocol/LogEntry.h>
+#include <bcos-framework/protocol/Transaction.h>
+#include <bcos-framework/protocol/TransactionReceipt.h>
 #include <bcos-protocol/TransactionStatus.h>
 #include <bcos-rpc/jsonrpc/Common.h>
 #include <bcos-rpc/jsonrpc/JsonRpcImpl_2_0.h>
+#include <bcos-rpc/web3jsonrpc/model/Web3Transaction.h>
+#include <bcos-task/Wait.h>
 #include <bcos-utilities/Base64.h>
-#include <bcos-utilities/DataConvertUtility.h>
-#include <bcos-utilities/Log.h>
+#include <json/value.h>
+#include <boost/algorithm/hex.hpp>
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/archive/iterators/base64_from_binary.hpp>
 #include <boost/archive/iterators/binary_from_base64.hpp>
 #include <boost/archive/iterators/transform_width.hpp>
 #include <boost/exception/diagnostic_information.hpp>
-#include <boost/uuid/uuid.hpp>
-#include <boost/uuid/uuid_generators.hpp>
-#include <boost/uuid/uuid_io.hpp>
+#include <boost/throw_exception.hpp>
+#include <exception>
+#include <iterator>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 
 using namespace std;
 using namespace bcos;
@@ -43,153 +58,96 @@ using namespace bcos::group;
 using namespace boost::iterators;
 using namespace boost::archive::iterators;
 
-void JsonRpcImpl_2_0::initMethod()
+JsonRpcImpl_2_0::JsonRpcImpl_2_0(GroupManager::Ptr _groupManager,
+    bcos::gateway::GatewayInterface::Ptr _gatewayInterface,
+    std::shared_ptr<boostssl::ws::WsService> _wsService, FilterSystem::Ptr filterSystem)
+  : m_groupManager(std::move(_groupManager)),
+    m_gatewayInterface(std::move(_gatewayInterface)),
+    m_wsService(std::move(_wsService)),
+    m_filterSystem(filterSystem)
 {
-    m_methodToFunc["call"] =
-        std::bind(&JsonRpcImpl_2_0::callI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["sendTransaction"] = std::bind(
-        &JsonRpcImpl_2_0::sendTransactionI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getTransaction"] = std::bind(
-        &JsonRpcImpl_2_0::getTransactionI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getTransactionReceipt"] = std::bind(&JsonRpcImpl_2_0::getTransactionReceiptI,
-        this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getBlockByHash"] = std::bind(
-        &JsonRpcImpl_2_0::getBlockByHashI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getBlockByNumber"] = std::bind(
-        &JsonRpcImpl_2_0::getBlockByNumberI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getBlockHashByNumber"] = std::bind(&JsonRpcImpl_2_0::getBlockHashByNumberI,
-        this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getBlockNumber"] = std::bind(
-        &JsonRpcImpl_2_0::getBlockNumberI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getCode"] =
-        std::bind(&JsonRpcImpl_2_0::getCodeI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getABI"] =
-        std::bind(&JsonRpcImpl_2_0::getABII, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getSealerList"] = std::bind(
-        &JsonRpcImpl_2_0::getSealerListI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getObserverList"] = std::bind(
-        &JsonRpcImpl_2_0::getObserverListI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getPbftView"] = std::bind(
-        &JsonRpcImpl_2_0::getPbftViewI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getPendingTxSize"] = std::bind(
-        &JsonRpcImpl_2_0::getPendingTxSizeI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getSyncStatus"] = std::bind(
-        &JsonRpcImpl_2_0::getSyncStatusI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getConsensusStatus"] = std::bind(
-        &JsonRpcImpl_2_0::getConsensusStatusI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getSystemConfigByKey"] = std::bind(&JsonRpcImpl_2_0::getSystemConfigByKeyI,
-        this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getTotalTransactionCount"] =
-        std::bind(&JsonRpcImpl_2_0::getTotalTransactionCountI, this, std::placeholders::_1,
-            std::placeholders::_2);
-    m_methodToFunc["getPeers"] =
-        std::bind(&JsonRpcImpl_2_0::getPeersI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getGroupPeers"] = std::bind(
-        &JsonRpcImpl_2_0::getGroupPeersI, this, std::placeholders::_1, std::placeholders::_2);
-
-    m_methodToFunc["getGroupList"] = std::bind(
-        &JsonRpcImpl_2_0::getGroupListI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getGroupInfo"] = std::bind(
-        &JsonRpcImpl_2_0::getGroupInfoI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getGroupInfoList"] = std::bind(
-        &JsonRpcImpl_2_0::getGroupInfoListI, this, std::placeholders::_1, std::placeholders::_2);
-    m_methodToFunc["getGroupNodeInfo"] = std::bind(
-        &JsonRpcImpl_2_0::getGroupNodeInfoI, this, std::placeholders::_1, std::placeholders::_2);
-
-    for (const auto& method : m_methodToFunc)
-    {
-        RPC_IMPL_LOG(INFO) << LOG_BADGE("initMethod") << LOG_KV("method", method.first);
-    }
-    RPC_IMPL_LOG(INFO) << LOG_BADGE("initMethod") << LOG_KV("size", m_methodToFunc.size());
+    m_wsService->registerMsgHandler(bcos::protocol::MessageType::RPC_REQUEST,
+        boost::bind(&JsonRpcImpl_2_0::handleRpcRequest, this, boost::placeholders::_1,
+            boost::placeholders::_2));
 }
 
-std::shared_ptr<bcos::bytes> JsonRpcImpl_2_0::decodeData(const std::string& _data)
+void JsonRpcImpl_2_0::handleRpcRequest(
+    std::shared_ptr<boostssl::MessageFace> _msg, std::shared_ptr<boostssl::ws::WsSession> _session)
 {
-    return fromHexString(_data);
-}
+    auto buffer = _msg->payload();
+    auto req = std::string_view((const char*)buffer->data(), buffer->size());
 
-void JsonRpcImpl_2_0::parseRpcRequestJson(
-    const std::string& _requestBody, JsonRequest& _jsonRequest)
-{
-    Json::Value root;
-    Json::Reader jsonReader;
-    std::string errorMessage;
+    auto start = std::chrono::high_resolution_clock::now();
+    auto endpoint = _session->endPoint();
+    auto seq = _msg->seq();
+    auto version = _msg->version();
+    auto ext = _msg->ext();
 
-    try
-    {
-        std::string jsonrpc = "";
-        std::string method = "";
-        int64_t id = 0;
-        do
+    auto weakptrSession = std::weak_ptr<boostssl::ws::WsSession>(_session);
+    auto messageFactory = m_wsService->messageFactory();
+
+    onRPCRequest(req, [ext, seq, version, weakptrSession, messageFactory, start](bcos::bytes resp) {
+        auto session = weakptrSession.lock();
+
+        auto end = std::chrono::high_resolution_clock::now();
+        auto total = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+        if (!session)
         {
-            if (!jsonReader.parse(_requestBody, root))
-            {
-                errorMessage = "invalid request json object";
-                break;
-            }
-
-            if (!root.isMember("jsonrpc"))
-            {
-                errorMessage = "request has no jsonrpc field";
-                break;
-            }
-            jsonrpc = root["jsonrpc"].asString();
-
-            if (!root.isMember("method"))
-            {
-                errorMessage = "request has no method field";
-                break;
-            }
-            method = root["method"].asString();
-
-            if (root.isMember("id"))
-            {
-                id = root["id"].asInt64();
-            }
-
-            if (!root.isMember("params"))
-            {
-                errorMessage = "request has no params field";
-                break;
-            }
-
-            if (!root["params"].isArray())
-            {
-                errorMessage = "request params is not array object";
-                break;
-            }
-
-            auto jParams = root["params"];
-
-            _jsonRequest.jsonrpc = jsonrpc;
-            _jsonRequest.method = method;
-            _jsonRequest.id = id;
-            _jsonRequest.params = jParams;
-
-            // RPC_IMPL_LOG(DEBUG) << LOG_BADGE("parseRpcRequestJson") << LOG_KV("method", method)
-            //                     << LOG_KV("requestMessage", _requestBody);
-
-            // success return
+            BCOS_LOG(TRACE) << LOG_DESC("[RPC][FACTORY][buildJsonRpc]")
+                            << LOG_DESC("unable to send response for session has been destroyed")
+                            << LOG_KV("seq", seq) << LOG_KV("totalTime", total);
             return;
-        } while (0);
-    }
-    catch (const std::exception& e)
+        }
+
+        if (session->isConnected())
+        {
+            // TODO: no need to copy resp
+            auto buffer = std::make_shared<bcos::bytes>(std::move(resp));
+
+            auto msg = messageFactory->buildMessage();
+            msg->setPayload(buffer);
+            msg->setVersion(version);
+            msg->setSeq(seq);
+            msg->setExt(ext);
+            session->asyncSendMessage(msg);
+        }
+        else
+        {
+            BCOS_LOG(TRACE) << LOG_DESC("[RPC][FACTORY][buildJsonRpc]")
+                            << LOG_DESC("unable to send response for session has been inactive")
+                            << LOG_KV("seq", seq) << LOG_KV("totalTime", total)
+                            << LOG_KV("endpoint", session->endPoint())
+                            << LOG_KV("refCount", session.use_count());
+        }
+    });
+}
+
+bcos::bytes JsonRpcImpl_2_0::decodeData(std::string_view _data)
+{
+    auto begin = _data.begin();
+    auto end = _data.end();
+    auto length = _data.size();
+
+    if ((length == 0) || (length % 2 != 0)) [[unlikely]]
     {
-        RPC_IMPL_LOG(ERROR) << LOG_BADGE("parseRpcRequestJson") << LOG_KV("request", _requestBody)
-                            << LOG_KV("error", boost::diagnostic_information(e));
-        BOOST_THROW_EXCEPTION(
-            JsonRpcException(JsonRpcError::ParseError, "Invalid JSON was received by the server."));
+        BOOST_THROW_EXCEPTION(std::runtime_error{"Unexpect hex string"});
     }
 
-    RPC_IMPL_LOG(ERROR) << LOG_BADGE("parseRpcRequestJson") << LOG_KV("request", _requestBody)
-                        << LOG_KV("errorMessage", errorMessage);
+    if (_data.starts_with("0x"))
+    {
+        begin += 2;
+        length -= 2;
+    }
 
-    BOOST_THROW_EXCEPTION(JsonRpcException(
-        JsonRpcError::InvalidRequest, "The JSON sent is not a valid Request object."));
+    bcos::bytes data;
+    data.reserve(length / 2);
+    boost::algorithm::unhex(begin, end, std::back_inserter(data));
+    return data;
 }
 
 void JsonRpcImpl_2_0::parseRpcResponseJson(
-    const std::string& _responseBody, JsonResponse& _jsonResponse)
+    std::string_view _responseBody, JsonResponse& _jsonResponse)
 {
     Json::Value root;
     Json::Reader jsonReader;
@@ -199,7 +157,7 @@ void JsonRpcImpl_2_0::parseRpcResponseJson(
     {
         do
         {
-            if (!jsonReader.parse(_responseBody, root))
+            if (!jsonReader.parse(_responseBody.begin(), _responseBody.end(), root))
             {
                 errorMessage = "invalid response json object";
                 break;
@@ -234,7 +192,7 @@ void JsonRpcImpl_2_0::parseRpcResponseJson(
             RPC_IMPL_LOG(TRACE) << LOG_BADGE("parseRpcResponseJson")
                                 << LOG_KV("jsonrpc", _jsonResponse.jsonrpc)
                                 << LOG_KV("id", _jsonResponse.id)
-                                << LOG_KV("error", _jsonResponse.error.toString())
+                                << LOG_KV("message", _jsonResponse.error.toString())
                                 << LOG_KV("responseBody", _responseBody);
 
             return;
@@ -244,150 +202,121 @@ void JsonRpcImpl_2_0::parseRpcResponseJson(
     {
         RPC_IMPL_LOG(ERROR) << LOG_BADGE("parseRpcResponseJson")
                             << LOG_KV("response", _responseBody)
-                            << LOG_KV("error", boost::diagnostic_information(e));
+                            << LOG_KV("message", boost::diagnostic_information(e));
         BOOST_THROW_EXCEPTION(
             JsonRpcException(JsonRpcError::ParseError, "Invalid JSON was received by the server."));
     }
 
     RPC_IMPL_LOG(ERROR) << LOG_BADGE("parseRpcResponseJson") << LOG_KV("response", _responseBody)
-                        << LOG_KV("errorMessage", errorMessage);
+                        << LOG_KV("message", errorMessage);
 
     BOOST_THROW_EXCEPTION(JsonRpcException(
         JsonRpcError::InvalidRequest, "The JSON sent is not a valid Response object."));
 }
 
-std::string JsonRpcImpl_2_0::toStringResponse(const JsonResponse& _jsonResponse)
+void bcos::rpc::toJsonResp(Json::Value& jResp, bcos::protocol::Transaction const& transaction)
 {
-    auto jResp = toJsonResponse(_jsonResponse);
-    Json::FastWriter writer;
-    std::string resp = writer.write(jResp);
-    return resp;
-}
-
-Json::Value JsonRpcImpl_2_0::toJsonResponse(const JsonResponse& _jsonResponse)
-{
-    Json::Value jResp;
-    jResp["jsonrpc"] = _jsonResponse.jsonrpc;
-    jResp["id"] = _jsonResponse.id;
-
-    if (_jsonResponse.error.code == 0)
-    {  // success
-        jResp["result"] = _jsonResponse.result;
-    }
-    else
-    {  // error
-        Json::Value jError;
-        jError["code"] = _jsonResponse.error.code;
-        jError["message"] = _jsonResponse.error.message;
-        jResp["error"] = jError;
-    }
-
-    return jResp;
-}
-
-void JsonRpcImpl_2_0::onRPCRequest(const std::string& _requestBody, Sender _sender)
-{
-    JsonRequest request;
-    JsonResponse response;
-    try
+    jResp["version"] = transaction.version();
+    jResp["hash"] = toHexStringWithPrefix(transaction.hash());
+    jResp["nonce"] = toHex(transaction.nonce());
+    jResp["blockLimit"] = transaction.blockLimit();
+    jResp["to"] = string(transaction.to());
+    jResp["input"] = toHexStringWithPrefix(transaction.input());
+    jResp["from"] = toHexStringWithPrefix(transaction.sender());
+    jResp["importTime"] = transaction.importTime();
+    jResp["chainID"] = std::string(transaction.chainId());
+    jResp["groupID"] = std::string(transaction.groupId());
+    jResp["abi"] = std::string(transaction.abi());
+    jResp["signature"] = toHexStringWithPrefix(transaction.signatureData());
+    jResp["extraData"] = std::string(transaction.extraData());
+    if (transaction.version() >= int32_t(bcos::protocol::TransactionVersion::V1_VERSION))
     {
-        parseRpcRequestJson(_requestBody, request);
-
-        response.jsonrpc = request.jsonrpc;
-        response.id = request.id;
-
-        const auto& method = request.method;
-        auto it = m_methodToFunc.find(method);
-        if (it == m_methodToFunc.end())
+        jResp["value"] = std::string(transaction.value());
+        jResp["gasPrice"] = std::string(transaction.gasPrice());
+        jResp["gasLimit"] = transaction.gasLimit();
+        jResp["maxFeePerGas"] = std::string(transaction.maxFeePerGas());
+        jResp["maxPriorityFeePerGas"] = std::string(transaction.maxPriorityFeePerGas());
+    }
+    if (transaction.version() >= (int32_t)bcos::protocol::TransactionVersion::V2_VERSION)
+    {
+        jResp["extension"] = Json::Value(Json::arrayValue);
+        for (const auto& ext : transaction.extension())
         {
-            BOOST_THROW_EXCEPTION(JsonRpcException(
-                JsonRpcError::MethodNotFound, "The method does not exist/is not available."));
+            jResp["extension"].append(ext);
+        }
+    }
+    if (transaction.type() == bcos::protocol::TransactionType::Web3Transaction) [[unlikely]]
+    {
+        Web3Transaction web3Tx;
+        auto extraBytesRef =
+            bcos::bytesRef(const_cast<byte*>(transaction.extraTransactionBytes().data()),
+                transaction.extraTransactionBytes().size());
+        codec::rlp::decodeFromPayload(extraBytesRef, web3Tx);
+        jResp["value"] = web3Tx.value.str();
+        jResp["gasLimit"] = web3Tx.gasLimit;
+        if (web3Tx.type >= TransactionType::EIP1559)
+        {
+            jResp["maxPriorityFeePerGas"] = web3Tx.maxPriorityFeePerGas.str();
+            jResp["maxFeePerGas"] = web3Tx.maxFeePerGas.str();
+            jResp["gasPrice"] = "0";
+        }
+        else
+        {
+            jResp["gasPrice"] = web3Tx.maxPriorityFeePerGas.str();
+        }
+    }
+}
+
+void bcos::rpc::toJsonResp(Json::Value& jResp, std::string_view _txHash,
+    protocol::TransactionStatus status,
+    bcos::protocol::TransactionReceipt const& transactionReceipt, bool _isWasm,
+    crypto::Hash& hashImpl)
+{
+    jResp["version"] = transactionReceipt.version();
+    std::string contractAddress = string(transactionReceipt.contractAddress());
+
+    if (!contractAddress.empty() && !_isWasm)
+    {
+        std::string checksumContractAddr = contractAddress;
+        toChecksumAddress(checksumContractAddr, hashImpl.hash(contractAddress).hex());
+
+        if (!contractAddress.starts_with("0x") && !contractAddress.starts_with("0X"))
+        {
+            contractAddress = "0x" + contractAddress;
         }
 
-        it->second(request.params,
-            [_requestBody, response, _sender](Error::Ptr _error, Json::Value& _result) mutable {
-                if (_error && (_error->errorCode() != bcos::protocol::CommonError::SUCCESS))
-                {
-                    // error
-                    response.error.code = _error->errorCode();
-                    response.error.message = _error->errorMessage();
-                }
-                else
-                {
-                    response.result.swap(_result);
-                }
-                auto strResp = toStringResponse(response);
-                _sender(strResp);
-                RPC_IMPL_LOG(TRACE) << LOG_BADGE("onRPCRequest") << LOG_KV("request", _requestBody)
-                                    << LOG_KV("response", strResp);
-            });
+        if (!checksumContractAddr.starts_with("0x") && !checksumContractAddr.starts_with("0X"))
+        {
+            checksumContractAddr = "0x" + checksumContractAddr;
+        }
 
-        // success response
-        return;
+        jResp["contractAddress"] = contractAddress;
+        jResp["checksumContractAddress"] = checksumContractAddr;
     }
-    catch (const JsonRpcException& e)
+    else
     {
-        response.error.code = e.code();
-        response.error.message = std::string(e.what());
+        jResp["contractAddress"] = contractAddress;
+        jResp["checksumContractAddress"] = contractAddress;
     }
-    catch (const std::exception& e)
+
+    jResp["gasUsed"] = transactionReceipt.gasUsed().str(16);
+    jResp["status"] = transactionReceipt.status();
+    jResp["blockNumber"] = transactionReceipt.blockNumber();
+    jResp["output"] = toHexStringWithPrefix(transactionReceipt.output());
+    jResp["message"] = transactionReceipt.message();
+    jResp["transactionHash"] = std::string(_txHash);
+
+    if (status == protocol::TransactionStatus::None)
     {
-        // server internal error or unexpected error
-        response.error.code = JsonRpcError::InvalidRequest;
-        response.error.message = std::string(e.what());
+        jResp["hash"] = transactionReceipt.hash().hexPrefixed();
+    }
+    else
+    {
+        jResp["hash"] = "0x";
     }
 
-    auto strResp = toStringResponse(response);
-    // error response
-    _sender(strResp);
-
-    // RPC_IMPL_LOG(DEBUG) << LOG_BADGE("onRPCRequest") << LOG_KV("request", _requestBody)
-    //                     << LOG_KV("response", strResp);
-}
-
-void JsonRpcImpl_2_0::toJsonResp(
-    Json::Value& jResp, bcos::protocol::Transaction::ConstPtr _transactionPtr)
-{
-    // transaction version
-    jResp["version"] = _transactionPtr->version();
-    // transaction hash
-    jResp["hash"] = toHexStringWithPrefix(_transactionPtr->hash());
-    // transaction nonce
-    jResp["nonce"] = _transactionPtr->nonce().str(16);
-    // blockLimit
-    jResp["blockLimit"] = _transactionPtr->blockLimit();
-    // the receiver address
-    jResp["to"] = string(_transactionPtr->to());
-    // the sender address
-    jResp["from"] = toHexStringWithPrefix(_transactionPtr->sender());
-    // the input data
-    jResp["input"] = toHexStringWithPrefix(_transactionPtr->input());
-    // importTime
-    jResp["importTime"] = _transactionPtr->importTime();
-    // the chainID
-    jResp["chainID"] = std::string(_transactionPtr->chainId());
-    // the groupID
-    jResp["groupID"] = std::string(_transactionPtr->groupId());
-    // the abi
-    jResp["abi"] = std::string(_transactionPtr->abi());
-    // the signature
-    jResp["signature"] = toHexStringWithPrefix(_transactionPtr->signatureData());
-}
-
-void JsonRpcImpl_2_0::toJsonResp(Json::Value& jResp, const std::string& _txHash,
-    bcos::protocol::TransactionReceipt::ConstPtr _transactionReceiptPtr)
-{
-    jResp["version"] = _transactionReceiptPtr->version();
-    jResp["contractAddress"] = string(_transactionReceiptPtr->contractAddress());
-    jResp["gasUsed"] = _transactionReceiptPtr->gasUsed().str(16);
-    jResp["status"] = _transactionReceiptPtr->status();
-    jResp["blockNumber"] = _transactionReceiptPtr->blockNumber();
-    jResp["output"] = toHexStringWithPrefix(_transactionReceiptPtr->output());
-    jResp["message"] = _transactionReceiptPtr->message();
-    jResp["transactionHash"] = _txHash;
-    jResp["hash"] = _transactionReceiptPtr->hash().hexPrefixed();
     jResp["logEntries"] = Json::Value(Json::arrayValue);
-    for (const auto& logEntry : _transactionReceiptPtr->logEntries())
+    for (const auto& logEntry : transactionReceipt.logEntries())
     {
         Json::Value jLog;
         jLog["address"] = std::string(logEntry.address());
@@ -399,11 +328,14 @@ void JsonRpcImpl_2_0::toJsonResp(Json::Value& jResp, const std::string& _txHash,
         jLog["data"] = toHexStringWithPrefix(logEntry.data());
         jResp["logEntries"].append(jLog);
     }
+    if (transactionReceipt.version() >= int32_t(bcos::protocol::TransactionVersion::V1_VERSION))
+    {
+        jResp["effectiveGasPrice"] = std::string(transactionReceipt.effectiveGasPrice());
+    }
 }
 
 
-void JsonRpcImpl_2_0::toJsonResp(
-    Json::Value& jResp, bcos::protocol::BlockHeader::Ptr _blockHeaderPtr)
+void bcos::rpc::toJsonResp(Json::Value& jResp, bcos::protocol::BlockHeader::Ptr _blockHeaderPtr)
 {
     if (!_blockHeaderPtr)
     {
@@ -454,17 +386,11 @@ void JsonRpcImpl_2_0::toJsonResp(
     jResp["signatureList"] = jSignList;
 }
 
-void JsonRpcImpl_2_0::toJsonResp(
-    Json::Value& jResp, bcos::protocol::Block::Ptr _blockPtr, bool _onlyTxHash)
+void bcos::rpc::toJsonResp(Json::Value& jResp, bcos::protocol::Block& block, bool _onlyTxHash)
 {
-    if (!_blockPtr)
-    {
-        return;
-    }
-
     // header
-    toJsonResp(jResp, _blockPtr->blockHeader());
-    auto txSize = _blockPtr->transactionsSize();
+    toJsonResp(jResp, block.blockHeader());
+    auto txSize = _onlyTxHash ? block.transactionsMetaDataSize() : block.transactionsSize();
 
     Json::Value jTxs(Json::arrayValue);
     for (std::size_t index = 0; index < txSize; ++index)
@@ -474,11 +400,12 @@ void JsonRpcImpl_2_0::toJsonResp(
         {
             // Note: should not call transactionHash for in the common cases transactionHash maybe
             // empty
-            jTx = toHexStringWithPrefix(_blockPtr->transaction(index)->hash());
+            jTx = toHexStringWithPrefix(block.transactionMetaData(index)->hash());
         }
         else
         {
-            toJsonResp(jTx, _blockPtr->transaction(index));
+            auto transaction = block.transaction(index);
+            toJsonResp(jTx, *transaction);
         }
         jTxs.append(jTx);
     }
@@ -486,113 +413,163 @@ void JsonRpcImpl_2_0::toJsonResp(
     jResp["transactions"] = jTxs;
 }
 
-void JsonRpcImpl_2_0::call(std::string const& _groupID, std::string const& _nodeName,
-    const std::string& _to, const std::string& _data, RespFunc _respFunc)
+void JsonRpcImpl_2_0::call(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _to, std::string_view _data, RespFunc _respFunc)
 {
-    RPC_IMPL_LOG(TRACE) << LOG_DESC("call") << LOG_KV("to", _to) << LOG_KV("group", _groupID)
-                        << LOG_KV("node", _nodeName) << LOG_KV("data", _data);
+    if (c_fileLogLevel == LogLevel::TRACE) [[unlikely]]
+    {
+        RPC_IMPL_LOG(TRACE) << LOG_DESC("call") << LOG_KV("to", _to) << LOG_KV("group", _groupID)
+                            << LOG_KV("node", _nodeName) << LOG_KV("data", _data);
+    }
 
     auto nodeService = getNodeService(_groupID, _nodeName, "call");
     auto transactionFactory = nodeService->blockFactory()->transactionFactory();
-    auto transaction =
-        transactionFactory->createTransaction(0, _to, *decodeData(_data), u256(0), 0, "", "", 0);
+    auto transaction = transactionFactory->createTransaction(
+        0, std::string(_to), decodeData(_data), "", 0, std::string(), std::string(), 0);
+    execCall(std::move(nodeService), std::move(transaction), std::move(_respFunc));
+}
 
-    nodeService->scheduler()->call(
-        transaction, [_to, _respFunc](Error::Ptr&& _error,
-                         protocol::TransactionReceipt::Ptr&& _transactionReceiptPtr) {
-            Json::Value jResp;
-            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+void JsonRpcImpl_2_0::call(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _to, std::string_view _data, std::string_view _sign,
+    bcos::rpc::RespFunc _respFunc)
+{
+    if (c_fileLogLevel == LogLevel::TRACE) [[unlikely]]
+    {
+        RPC_IMPL_LOG(TRACE) << LOG_DESC("call") << LOG_KV("to", _to) << LOG_KV("group", _groupID)
+                            << LOG_KV("node", _nodeName) << LOG_KV("data", _data)
+                            << LOG_KV("sign", _sign);
+    }
+    auto nodeService = getNodeService(_groupID, _nodeName, "call");
+    auto groupInfo = m_groupManager->getGroupInfo(_groupID);
+    // FIXME: groupInfo tars not maintenance smCryptoType
+    auto cryptoType = groupInfo->smCryptoType() ? group::SM_NODE : group::NON_SM_NODE;
+    auto transactionFactory = nodeService->blockFactory()->transactionFactory();
+    auto transaction = transactionFactory->createTransaction(
+        0, std::string(_to), decodeData(_data), "", 0, std::string(), std::string(), 0);
+    auto [result, sender] = CallValidator::verify(_to, _data, _sign, cryptoType);
+    if (!result) [[unlikely]]
+    {
+        RPC_IMPL_LOG(TRACE) << LOG_DESC("call with sign verify failed") << LOG_KV("to", _to)
+                            << LOG_KV("data", _data) << LOG_KV("sign", _sign);
+        Json::Value jResp;
+        _respFunc(BCOS_ERROR_PTR(
+                      (int32_t)protocol::TransactionStatus::InvalidSignature, "Invalid signature"),
+            jResp);
+        return;
+    }
+    transaction->forceSender(sender);
+    execCall(std::move(nodeService), std::move(transaction), std::move(_respFunc));
+}
+
+void JsonRpcImpl_2_0::sendTransaction(std::string_view groupID, std::string_view nodeName,
+    std::string_view data, bool requireProof, RespFunc respFunc)
+{
+    task::wait([](JsonRpcImpl_2_0* self, std::string_view groupID, std::string_view nodeName,
+                   std::string_view data, bool requireProof,
+                   RespFunc respFunc) -> task::Task<void> {
+        auto nodeService = self->getNodeService(groupID, nodeName, "sendTransaction");
+
+        auto txpool = nodeService->txpool();
+        if (!txpool) [[unlikely]]
+        {
+            BOOST_THROW_EXCEPTION(
+                JsonRpcException(JsonRpcError::InternalError, "TXPool not available!"));
+        }
+
+        auto groupInfo = self->m_groupManager->getGroupInfo(groupID);
+        if (!groupInfo) [[unlikely]]
+        {
+            BOOST_THROW_EXCEPTION(JsonRpcException(JsonRpcError::GroupNotExist,
+                "The group " + std::string(groupID) + " does not exist!"));
+        }
+
+        Json::Value jResp;
+        try
+        {
+            auto isWasm = groupInfo->wasm();
+            auto transactionData = decodeData(data);
+            auto transaction = nodeService->blockFactory()->transactionFactory()->createTransaction(
+                bcos::ref(transactionData), false, true);
+            transaction->forceSender({});  // must clear sender here for future verify
+
+            if (c_fileLogLevel <= TRACE)
             {
-                jResp["blockNumber"] = _transactionReceiptPtr->blockNumber();
-                jResp["status"] = _transactionReceiptPtr->status();
-                jResp["output"] = toHexStringWithPrefix(_transactionReceiptPtr->output());
+                RPC_IMPL_LOG(TRACE) << LOG_DESC("sendTransaction") << LOG_KV("group", groupID)
+                                    << LOG_KV("node", nodeName) << LOG_KV("isWasm", isWasm);
+            }
+
+            auto start = utcSteadyTime();
+            co_await txpool->broadcastTransactionBuffer(bcos::ref(transactionData));
+            auto submitResult = co_await txpool->submitTransaction(transaction);
+
+            auto txHash = submitResult->txHash();
+            auto hexPreTxHash = txHash.hexPrefixed();
+            auto status = submitResult->status();
+
+            auto totalTime = utcSteadyTime() - start;  // ms
+            if (c_fileLogLevel <= TRACE)
+            {
+                RPC_IMPL_LOG(TRACE)
+                    << LOG_BADGE("sendTransaction") << LOG_DESC("submit callback")
+                    << LOG_KV("hexPreTxHash", hexPreTxHash) << LOG_KV("status", status)
+                    << LOG_KV("requireProof", requireProof) << LOG_KV("txCostTime", totalTime);
+            }
+
+            toJsonResp(jResp, hexPreTxHash, (protocol::TransactionStatus)submitResult->status(),
+                *(submitResult->transactionReceipt()), isWasm,
+                *(nodeService->blockFactory()->cryptoSuite()->hashImpl()));
+            jResp["to"] = submitResult->to();
+            jResp["from"] = toHexStringWithPrefix(submitResult->sender());
+
+            if (protocol::g_BCOSConfig.needRetInput())
+            {
+                jResp["input"] = toHexStringWithPrefix(transaction->input());
+                jResp["extraData"] = std::string(transaction->extraData());
+            }
+
+            if (requireProof) [[unlikely]]
+            {
+                auto ledger = nodeService->ledger();
+                ledger->asyncGetTransactionReceiptByHash(txHash, true,
+                    [&respFunc, &jResp](
+                        auto&& error, [[maybe_unused]] auto&& receipt, auto&& merkle) {
+                        // ledger logic: if error, return empty merkle
+                        // for compatibility
+                        JsonRpcImpl_2_0::addProofToResponse(jResp, "txReceiptProof", merkle);
+                        JsonRpcImpl_2_0::addProofToResponse(jResp, "receiptProof", merkle);
+                        respFunc(nullptr, jResp);
+                    });
+                co_return;
+            }
+            respFunc(nullptr, jResp);
+        }
+        catch (bcos::Error& e)
+        {
+            auto info = boost::diagnostic_information(e);
+            if (e.errorCode() == (int64_t)bcos::protocol::TransactionStatus::TxPoolIsFull)
+            {
+                RPC_IMPL_LOG(DEBUG) << "sendTransaction error" << LOG_KV("errCode", e.errorCode())
+                                    << LOG_KV("msg", info);
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("call") << LOG_KV("to", _to)
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                RPC_IMPL_LOG(WARNING) << "sendTransaction error" << LOG_KV("errCode", e.errorCode())
+                                      << LOG_KV("msg", info);
             }
-
-            _respFunc(_error, jResp);
-        });
-}
-
-void JsonRpcImpl_2_0::sendTransaction(std::string const& _groupID, std::string const& _nodeName,
-    const std::string& _data, bool _requireProof, RespFunc _respFunc)
-{
-    auto self = std::weak_ptr<JsonRpcImpl_2_0>(shared_from_this());
-    auto transactionDataPtr = decodeData(_data);
-    auto nodeService = getNodeService(_groupID, _nodeName, "sendTransaction");
-    auto txpool = nodeService->txpool();
-    checkService(txpool, "txpool");
-
-    // Note: avoid call tx->sender() or tx->verify() here in case of verify the same transaction
-    // more than once
-    auto tx = nodeService->blockFactory()->transactionFactory()->createTransaction(
-        *transactionDataPtr, false);
-    auto jResp = std::make_shared<Json::Value>();
-    (*jResp)["input"] = toHexStringWithPrefix(tx->input());
-    RPC_IMPL_LOG(TRACE) << LOG_DESC("sendTransaction") << LOG_KV("group", _groupID)
-                        << LOG_KV("node", _nodeName);
-    // Note: In order to avoid taking up too much memory at runtime, it is not recommended to pass
-    // tx to lamba expressions for the tx will only be released when submitCallback is called
-    auto submitCallback =
-        [_groupID, jResp, _requireProof, respFunc = std::move(_respFunc), self](Error::Ptr _error,
-            bcos::protocol::TransactionSubmitResult::Ptr _transactionSubmitResult) {
-            auto rpc = self.lock();
-            if (!rpc)
-            {
-                return;
-            }
-
-            if (_error && _error->errorCode() != bcos::protocol::CommonError::SUCCESS)
-            {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("sendTransaction") << LOG_KV("requireProof", _requireProof)
-                    << LOG_KV("hash", _transactionSubmitResult ?
-                                          _transactionSubmitResult->txHash().abridged() :
-                                          "unknown")
-                    << LOG_KV("code", _error->errorCode())
-                    << LOG_KV("message", _error->errorMessage());
-
-                respFunc(_error, *jResp);
-
-                return;
-            }
-
-            if (_transactionSubmitResult->transactionReceipt())
-            {
-                // get transaction receipt
-                auto txHash = _transactionSubmitResult->txHash();
-                auto hexPreTxHash = txHash.hexPrefixed();
-
-                RPC_IMPL_LOG(TRACE)
-                    << LOG_BADGE("sendTransaction") << LOG_DESC("getTransactionReceipt")
-                    << LOG_KV("hexPreTxHash", hexPreTxHash)
-                    << LOG_KV("requireProof", _requireProof);
-                if (_transactionSubmitResult->status() !=
-                    (int32_t)bcos::protocol::TransactionStatus::None)
-                {
-                    std::stringstream errorMsg;
-                    errorMsg << (bcos::protocol::TransactionStatus)(
-                        _transactionSubmitResult->status());
-                    (*jResp)["errorMessage"] = errorMsg.str();
-                }
-                toJsonResp(*jResp, hexPreTxHash, _transactionSubmitResult->transactionReceipt());
-                (*jResp)["to"] = string(_transactionSubmitResult->to());
-                (*jResp)["from"] = toHexStringWithPrefix(_transactionSubmitResult->sender());
-                // TODO: notify transactionProof
-                respFunc(nullptr, (*jResp));
-            }
-        };
-    txpool->asyncSubmit(transactionDataPtr, submitCallback);
+            respFunc(std::make_shared<bcos::Error>(std::move(e)), jResp);
+        }
+        catch (std::exception& e)
+        {
+            auto info = boost::diagnostic_information(e);
+            RPC_IMPL_LOG(WARNING) << "RPC common exception: " << info;
+            respFunc(BCOS_ERROR_PTR(-1, std::move(info)), jResp);
+        }
+    }(this, groupID, nodeName, data, requireProof, std::move(respFunc)));
 }
 
 
 void JsonRpcImpl_2_0::addProofToResponse(
-    Json::Value& jResp, std::string const& _key, ledger::MerkleProofPtr _merkleProofPtr)
+    Json::Value& jResp, const std::string& _key, ledger::MerkleProofPtr _merkleProofPtr)
 {
     if (!_merkleProofPtr)
     {
@@ -603,41 +580,29 @@ void JsonRpcImpl_2_0::addProofToResponse(
                         << LOG_KV("key", _key) << LOG_KV("merkleProofPtr", _merkleProofPtr->size());
 
     uint32_t index = 0;
-    for (const auto& merkleItem : *_merkleProofPtr)
-    {
-        jResp[_key][index]["left"] = Json::arrayValue;
-        jResp[_key][index]["right"] = Json::arrayValue;
-        const auto& left = merkleItem.first;
-        for (const auto& item : left)
-        {
-            jResp[_key][index]["left"].append(item);
-        }
-
-        const auto& right = merkleItem.second;
-        for (const auto& item : right)
-        {
-            jResp[_key][index]["right"].append(item);
-        }
-        ++index;
-    }
+    jResp[_key] = Json::arrayValue;
+    std::for_each(_merkleProofPtr->begin(), _merkleProofPtr->end(),
+        [&jResp, &_key](const auto& item) { jResp[_key].append(item.hex()); });
 }
 
-void JsonRpcImpl_2_0::getTransaction(std::string const& _groupID, std::string const& _nodeName,
-    const std::string& _txHash, bool _requireProof, RespFunc _respFunc)
+void JsonRpcImpl_2_0::getTransaction(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _txHash, bool _requireProof, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getTransaction") << LOG_KV("txHash", _txHash)
                         << LOG_KV("requireProof", _requireProof) << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
 
-    bcos::crypto::HashListPtr hashListPtr = std::make_shared<bcos::crypto::HashList>();
-    hashListPtr->push_back(bcos::crypto::HashType(_txHash));
+    auto hashListPtr = std::make_shared<bcos::crypto::HashList>();
+
+    // TODO: Error hash here, need hex2bin
+    hashListPtr->push_back(bcos::crypto::HashType(_txHash, bcos::crypto::HashType::FromHex));
 
     auto nodeService = getNodeService(_groupID, _nodeName, "getTransaction");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
     ledger->asyncGetBatchTxsByHashList(hashListPtr, _requireProof,
-        [_txHash, _requireProof, _respFunc](Error::Ptr _error,
-            bcos::protocol::TransactionsPtr _transactionsPtr,
+        [m_txHash = std::string(_txHash), _requireProof, m_respFunc = std::move(_respFunc)](
+            Error::Ptr _error, bcos::protocol::TransactionsPtr _transactionsPtr,
             std::shared_ptr<std::map<std::string, ledger::MerkleProofPtr>> _transactionProofsPtr) {
             Json::Value jResp;
             if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
@@ -645,11 +610,11 @@ void JsonRpcImpl_2_0::getTransaction(std::string const& _groupID, std::string co
                 if (!_transactionsPtr->empty())
                 {
                     auto transactionPtr = (*_transactionsPtr)[0];
-                    toJsonResp(jResp, transactionPtr);
+                    toJsonResp(jResp, *transactionPtr);
                 }
 
                 RPC_IMPL_LOG(TRACE)
-                    << LOG_DESC("getTransaction") << LOG_KV("txHash", _txHash)
+                    << LOG_DESC("getTransaction") << LOG_KV("txHash", m_txHash)
                     << LOG_KV("requireProof", _requireProof)
                     << LOG_KV("transactionProofsPtr size",
                            (_transactionProofsPtr ? (int64_t)_transactionProofsPtr->size() : -1));
@@ -658,38 +623,54 @@ void JsonRpcImpl_2_0::getTransaction(std::string const& _groupID, std::string co
                 if (_requireProof && _transactionProofsPtr && !_transactionProofsPtr->empty())
                 {
                     auto transactionProofPtr = _transactionProofsPtr->begin()->second;
-                    addProofToResponse(jResp, "transactionProof", transactionProofPtr);
+                    // for compatibility
+                    addProofToResponse(
+                        jResp, "transactionProof", std::make_shared<ledger::MerkleProof>());
+                    addProofToResponse(jResp, "txProof", transactionProofPtr);
                 }
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getTransaction") << LOG_KV("txHash", _txHash)
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getTransaction failed") << LOG_KV("txHash", m_txHash)
                     << LOG_KV("requireProof", _requireProof)
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
             }
 
-            _respFunc(_error, jResp);
+            m_respFunc(_error, jResp);
         });
 }
 
-void JsonRpcImpl_2_0::getTransactionReceipt(std::string const& _groupID,
-    std::string const& _nodeName, const std::string& _txHash, bool _requireProof,
-    RespFunc _respFunc)
+void JsonRpcImpl_2_0::getTransactionReceipt(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _txHash, bool _requireProof, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getTransactionReceipt") << LOG_KV("txHash", _txHash)
                         << LOG_KV("requireProof", _requireProof) << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
 
-    auto hash = bcos::crypto::HashType(_txHash);
+    auto hash = bcos::crypto::HashType(_txHash, bcos::crypto::HashType::FromHex);
 
     auto nodeService = getNodeService(_groupID, _nodeName, "getTransactionReceipt");
     auto ledger = nodeService->ledger();
+
     checkService(ledger, "ledger");
+    auto hashImpl = nodeService->blockFactory()->cryptoSuite()->hashImpl();
+
+    auto groupInfo = m_groupManager->getGroupInfo(_groupID);
+    if (!groupInfo)
+    {
+        BOOST_THROW_EXCEPTION(JsonRpcException(JsonRpcError::GroupNotExist,
+            "The group " + std::string(_groupID) + " does not exist!"));
+    }
+
+    bool isWasm = groupInfo->wasm();
+
     auto self = std::weak_ptr<JsonRpcImpl_2_0>(shared_from_this());
     ledger->asyncGetTransactionReceiptByHash(hash, _requireProof,
-        [_groupID, _nodeName, _txHash, hash, _requireProof, _respFunc, self](Error::Ptr _error,
+        [m_group = std::string(_groupID), m_nodeName = std::string(_nodeName),
+            m_txHash = std::string(_txHash), hash, _requireProof, m_respFunc = std::move(_respFunc),
+            self, hashImpl, isWasm](Error::Ptr _error,
             protocol::TransactionReceipt::ConstPtr _transactionReceiptPtr,
             ledger::MerkleProofPtr _merkleProofPtr) {
             auto rpc = self.lock();
@@ -700,51 +681,55 @@ void JsonRpcImpl_2_0::getTransactionReceipt(std::string const& _groupID,
             Json::Value jResp;
             if (_error && (_error->errorCode() != bcos::protocol::CommonError::SUCCESS))
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getTransactionReceipt") << LOG_KV("txHash", _txHash)
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getTransactionReceipt failed") << LOG_KV("txHash", m_txHash)
                     << LOG_KV("requireProof", _requireProof)
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
 
-                _respFunc(_error, jResp);
+                m_respFunc(_error, jResp);
                 return;
             }
 
-            toJsonResp(jResp, hash.hexPrefixed(), _transactionReceiptPtr);
+            toJsonResp(jResp, hash.hexPrefixed(), protocol::TransactionStatus::None,
+                *_transactionReceiptPtr, isWasm, *hashImpl);
 
-            RPC_IMPL_LOG(TRACE) << LOG_DESC("getTransactionReceipt") << LOG_KV("txHash", _txHash)
+            RPC_IMPL_LOG(TRACE) << LOG_DESC("getTransactionReceipt") << LOG_KV("txHash", m_txHash)
                                 << LOG_KV("requireProof", _requireProof)
                                 << LOG_KV("merkleProofPtr", _merkleProofPtr);
 
             if (_requireProof && _merkleProofPtr)
             {
-                addProofToResponse(jResp, "receiptProof", _merkleProofPtr);
+                addProofToResponse(jResp, "receiptProof", std::make_shared<ledger::MerkleProof>());
+                // for compatibility
+                addProofToResponse(jResp, "txReceiptProof", _merkleProofPtr);
             }
 
             // fetch transaction proof
-            rpc->getTransaction(_groupID, _nodeName, _txHash, _requireProof,
-                [jResp, _txHash, _respFunc](bcos::Error::Ptr _error, Json::Value& _jTx) {
-                    auto jRespCopy = jResp;
+            rpc->getTransaction(m_group, m_nodeName, m_txHash, _requireProof,
+                [m_jResp = std::move(jResp), m_txHash, m_respFunc = std::move(m_respFunc)](
+                    bcos::Error::Ptr _error, Json::Value& _jTx) mutable {
                     if (_error && _error->errorCode() != bcos::protocol::CommonError::SUCCESS)
                     {
                         RPC_IMPL_LOG(WARNING)
                             << LOG_BADGE("getTransactionReceipt") << LOG_DESC("getTransaction")
-                            << LOG_KV("hexPreTxHash", _txHash)
-                            << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                            << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                            << LOG_KV("hexPreTxHash", m_txHash)
+                            << LOG_KV("code", _error ? _error->errorCode() : 0)
+                            << LOG_KV("message", _error ? _error->errorMessage() : "success");
                     }
-                    jRespCopy["input"] = _jTx["input"];
-                    jRespCopy["from"] = _jTx["from"];
-                    jRespCopy["to"] = _jTx["to"];
-                    jRespCopy["transactionProof"] = _jTx["transactionProof"];
+                    m_jResp["input"] = _jTx["input"];
+                    m_jResp["from"] = _jTx["from"];
+                    m_jResp["to"] = _jTx["to"];
+                    m_jResp["extraData"] = _jTx["extraData"];
+                    m_jResp["transactionProof"] = _jTx["transactionProof"];
 
-                    _respFunc(nullptr, jRespCopy);
+                    m_respFunc(nullptr, m_jResp);
                 });
         });
 }
 
-void JsonRpcImpl_2_0::getBlockByHash(std::string const& _groupID, std::string const& _nodeName,
-    const std::string& _blockHash, bool _onlyHeader, bool _onlyTxHash, RespFunc _respFunc)
+void JsonRpcImpl_2_0::getBlockByHash(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _blockHash, bool _onlyHeader, bool _onlyTxHash, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getBlockByHash") << LOG_KV("blockHash", _blockHash)
                         << LOG_KV("onlyHeader", _onlyHeader) << LOG_KV("onlyTxHash", _onlyTxHash)
@@ -754,33 +739,36 @@ void JsonRpcImpl_2_0::getBlockByHash(std::string const& _groupID, std::string co
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
     auto self = std::weak_ptr<JsonRpcImpl_2_0>(shared_from_this());
-    ledger->asyncGetBlockNumberByHash(bcos::crypto::HashType(_blockHash),
-        [_groupID, _nodeName, _blockHash, _onlyHeader, _onlyTxHash, _respFunc, self](
-            Error::Ptr _error, protocol::BlockNumber blockNumber) {
+    ledger->asyncGetBlockNumberByHash(
+        bcos::crypto::HashType(_blockHash, bcos::crypto::HashType::FromHex),
+        [m_groupID = std::string(_groupID), m_nodeName = std::string(_nodeName),
+            m_blockHash = std::string(_blockHash), _onlyHeader, _onlyTxHash,
+            m_respFunc = std::move(_respFunc),
+            self](Error::Ptr _error, protocol::BlockNumber blockNumber) {
             if (!_error || _error->errorCode() == bcos::protocol::CommonError::SUCCESS)
             {
                 auto rpc = self.lock();
                 if (rpc)
                 {
                     // call getBlockByNumber
-                    return rpc->getBlockByNumber(
-                        _groupID, _nodeName, blockNumber, _onlyHeader, _onlyTxHash, _respFunc);
+                    return rpc->getBlockByNumber(m_groupID, m_nodeName, blockNumber, _onlyHeader,
+                        _onlyTxHash, std::move(m_respFunc));
                 }
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getBlockByHash") << LOG_KV("blockHash", _blockHash)
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getBlockByHash failed") << LOG_KV("blockHash", m_blockHash)
                     << LOG_KV("onlyHeader", _onlyHeader) << LOG_KV("onlyTxHash", _onlyTxHash)
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
                 Json::Value jResp;
-                _respFunc(_error, jResp);
+                m_respFunc(_error, jResp);
             }
         });
 }
 
-void JsonRpcImpl_2_0::getBlockByNumber(std::string const& _groupID, std::string const& _nodeName,
+void JsonRpcImpl_2_0::getBlockByNumber(std::string_view _groupID, std::string_view _nodeName,
     int64_t _blockNumber, bool _onlyHeader, bool _onlyTxHash, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getBlockByNumber") << LOG_KV("_blockNumber", _blockNumber)
@@ -790,18 +778,21 @@ void JsonRpcImpl_2_0::getBlockByNumber(std::string const& _groupID, std::string 
     auto nodeService = getNodeService(_groupID, _nodeName, "getBlockByNumber");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
-    ledger->asyncGetBlockDataByNumber(_blockNumber,
-        _onlyHeader ? bcos::ledger::HEADER : bcos::ledger::HEADER | bcos::ledger::TRANSACTIONS,
-        [_blockNumber, _onlyHeader, _onlyTxHash, _respFunc](
+    auto flag = _onlyHeader ?
+                    bcos::ledger::HEADER :
+                    (_onlyTxHash ? bcos::ledger::HEADER | bcos::ledger::TRANSACTIONS_HASH :
+                                   bcos::ledger::HEADER | bcos::ledger::TRANSACTIONS);
+    ledger->asyncGetBlockDataByNumber(_blockNumber, flag,
+        [_blockNumber, _onlyHeader, _onlyTxHash, m_respFunc = std::move(_respFunc)](
             Error::Ptr _error, protocol::Block::Ptr _block) {
             Json::Value jResp;
             if (_error && _error->errorCode() != bcos::protocol::CommonError::SUCCESS)
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getBlockByNumber") << LOG_KV("blockNumber", _blockNumber)
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getBlockByNumber failed") << LOG_KV("blockNumber", _blockNumber)
                     << LOG_KV("onlyHeader", _onlyHeader) << LOG_KV("onlyTxHash", _onlyTxHash)
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
             }
             else
             {
@@ -811,15 +802,15 @@ void JsonRpcImpl_2_0::getBlockByNumber(std::string const& _groupID, std::string 
                 }
                 else
                 {
-                    toJsonResp(jResp, _block, _onlyTxHash);
+                    toJsonResp(jResp, *_block, _onlyTxHash);
                 }
             }
-            _respFunc(_error, jResp);
+            m_respFunc(_error, jResp);
         });
 }
 
-void JsonRpcImpl_2_0::getBlockHashByNumber(std::string const& _groupID,
-    std::string const& _nodeName, int64_t _blockNumber, RespFunc _respFunc)
+void JsonRpcImpl_2_0::getBlockHashByNumber(
+    std::string_view _groupID, std::string_view _nodeName, int64_t _blockNumber, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getBlockHashByNumber") << LOG_KV("blockNumber", _blockNumber)
                         << LOG_KV("group", _groupID) << LOG_KV("node", _nodeName);
@@ -827,23 +818,23 @@ void JsonRpcImpl_2_0::getBlockHashByNumber(std::string const& _groupID,
     auto nodeService = getNodeService(_groupID, _nodeName, "getBlockHashByNumber");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
-    ledger->asyncGetBlockHashByNumber(
-        _blockNumber, [_respFunc](Error::Ptr _error, crypto::HashType const& _hashValue) {
+    ledger->asyncGetBlockHashByNumber(_blockNumber,
+        [m_respFunc = std::move(_respFunc)](Error::Ptr _error, crypto::HashType const& _hashValue) {
             if (_error && (_error->errorCode() != bcos::protocol::CommonError::SUCCESS))
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getBlockHashByNumber")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getBlockHashByNumber failed")
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
             }
 
             Json::Value jResp = _hashValue.hexPrefixed();
-            _respFunc(nullptr, jResp);
+            m_respFunc(nullptr, jResp);
         });
 }
 
 void JsonRpcImpl_2_0::getBlockNumber(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getBlockNumber") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
@@ -851,33 +842,48 @@ void JsonRpcImpl_2_0::getBlockNumber(
     auto nodeService = getNodeService(_groupID, _nodeName, "getBlockNumber");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
-    ledger->asyncGetBlockNumber([_respFunc](Error::Ptr _error, protocol::BlockNumber _blockNumber) {
-        if (_error && (_error->errorCode() != bcos::protocol::CommonError::SUCCESS))
-        {
-            RPC_IMPL_LOG(ERROR) << LOG_BADGE("getBlockNumber")
-                                << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                                << LOG_KV(
-                                       "errorMessage", _error ? _error->errorMessage() : "success")
-                                << LOG_KV("blockNumber", _blockNumber);
-        }
+    ledger->asyncGetBlockNumber(
+        [m_respFunc = std::move(_respFunc)](Error::Ptr _error, protocol::BlockNumber _blockNumber) {
+            if (_error && (_error->errorCode() != bcos::protocol::CommonError::SUCCESS))
+            {
+                RPC_IMPL_LOG(INFO) << LOG_BADGE("getBlockNumber failed")
+                                   << LOG_KV("code", _error ? _error->errorCode() : 0)
+                                   << LOG_KV("message", _error ? _error->errorMessage() : "success")
+                                   << LOG_KV("blockNumber", _blockNumber);
+            }
 
-        Json::Value jResp = _blockNumber;
-        _respFunc(_error, jResp);
-    });
+            Json::Value jResp = _blockNumber;
+            m_respFunc(_error, jResp);
+        });
 }
 
-void JsonRpcImpl_2_0::getCode(std::string const& _groupID, std::string const& _nodeName,
-    const std::string _contractAddress, RespFunc _callback)
+void JsonRpcImpl_2_0::getCode(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _contractAddress, RespFunc _callback)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getCode") << LOG_KV("contractAddress", _contractAddress)
                         << LOG_KV("group", _groupID) << LOG_KV("node", _nodeName);
 
     auto nodeService = getNodeService(_groupID, _nodeName, "getCode");
 
+    auto groupInfo = m_groupManager->getGroupInfo(_groupID);
+    if (!groupInfo) [[unlikely]]
+    {
+        BOOST_THROW_EXCEPTION(JsonRpcException(JsonRpcError::GroupNotExist,
+            "The group " + std::string(_groupID) + " does not exist!"));
+    }
+
+    auto isWasm = groupInfo->wasm();
+    // trim 0x prefix for solidity contract
+    if (!isWasm && (_contractAddress.starts_with("0x") || _contractAddress.starts_with("0X")))
+    {
+        _contractAddress = _contractAddress.substr(2);
+    }
+
+    auto lowerAddress = boost::to_lower_copy(std::string(_contractAddress));
+
     auto scheduler = nodeService->scheduler();
-    scheduler->getCode(
-        std::string_view(_contractAddress), [_contractAddress, callback = std::move(_callback)](
-                                                Error::Ptr _error, bcos::bytes _codeData) {
+    scheduler->getCode(std::string_view(lowerAddress),
+        [lowerAddress, callback = std::move(_callback)](Error::Ptr _error, bcos::bytes _codeData) {
             std::string code;
             if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
             {
@@ -889,34 +895,51 @@ void JsonRpcImpl_2_0::getCode(std::string const& _groupID, std::string const& _n
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getCode") << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success")
-                    << LOG_KV("contractAddress", _contractAddress);
+                RPC_IMPL_LOG(INFO) << LOG_BADGE("getCode failed")
+                                   << LOG_KV("code", _error ? _error->errorCode() : 0)
+                                   << LOG_KV("message", _error ? _error->errorMessage() : "success")
+                                   << LOG_KV("contractAddress", lowerAddress);
             }
 
-            Json::Value jResp = code;
+            Json::Value jResp = std::move(code);
             callback(_error, jResp);
         });
 }
 
-void JsonRpcImpl_2_0::getABI(std::string const& _groupID, std::string const& _nodeName,
-    const std::string _contractAddress, RespFunc _callback)
+void JsonRpcImpl_2_0::getABI(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _contractAddress, RespFunc _callback)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getABI") << LOG_KV("contractAddress", _contractAddress)
                         << LOG_KV("group", _groupID) << LOG_KV("node", _nodeName);
 
     auto nodeService = getNodeService(_groupID, _nodeName, "getABI");
 
+    auto groupInfo = m_groupManager->getGroupInfo(_groupID);
+    if (!groupInfo) [[unlikely]]
+    {
+        BOOST_THROW_EXCEPTION(JsonRpcException(JsonRpcError::GroupNotExist,
+            "The group " + std::string(_groupID) + " does not exist!"));
+    }
+
+    auto isWasm = groupInfo->wasm();
+    // trim 0x prefix for solidity contract address
+    if (!isWasm && (_contractAddress.starts_with("0x") || _contractAddress.starts_with("0X")))
+    {
+        _contractAddress = _contractAddress.substr(2);
+    }
+
+
+    auto lowerAddress = boost::to_lower_copy(std::string(_contractAddress));
+
     auto scheduler = nodeService->scheduler();
-    scheduler->getABI(std::string_view(_contractAddress),
-        [_contractAddress, callback = std::move(_callback)](Error::Ptr _error, std::string _abi) {
+    scheduler->getABI(std::string_view(lowerAddress),
+        [lowerAddress, callback = std::move(_callback)](Error::Ptr _error, std::string _abi) {
             if (_error)
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getABI") << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success")
-                    << LOG_KV("contractAddress", _contractAddress);
+                RPC_IMPL_LOG(INFO) << LOG_BADGE("getABI failed")
+                                   << LOG_KV("code", _error ? _error->errorCode() : 0)
+                                   << LOG_KV("message", _error ? _error->errorMessage() : "success")
+                                   << LOG_KV("contractAddress", lowerAddress);
             }
             Json::Value jResp = _abi;
             callback(_error, jResp);
@@ -924,45 +947,43 @@ void JsonRpcImpl_2_0::getABI(std::string const& _groupID, std::string const& _no
 }
 
 void JsonRpcImpl_2_0::getSealerList(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getSealerList") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
-
 
     auto nodeService = getNodeService(_groupID, _nodeName, "getSealerList");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
     ledger->asyncGetNodeListByType(bcos::ledger::CONSENSUS_SEALER,
-        [_respFunc](Error::Ptr _error, consensus::ConsensusNodeListPtr _consensusNodeListPtr) {
+        [m_respFunc = std::move(_respFunc)](
+            const Error::Ptr& _error, consensus::ConsensusNodeList const& _consensusNodeListPtr) {
             Json::Value jResp = Json::Value(Json::arrayValue);
             if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
             {
-                if (_consensusNodeListPtr)
+                for (const auto& consensusNodePtr : _consensusNodeListPtr)
                 {
-                    for (const auto& consensusNodePtr : *_consensusNodeListPtr)
-                    {
-                        Json::Value node;
-                        node["nodeID"] = consensusNodePtr->nodeID()->hex();
-                        node["weight"] = consensusNodePtr->weight();
-                        jResp.append(node);
-                    }
+                    Json::Value node;
+                    node["nodeID"] = consensusNodePtr.nodeID->hex();
+                    node["weight"] = consensusNodePtr.voteWeight;
+                    node["termWeight"] = consensusNodePtr.termWeight;
+                    jResp.append(node);
                 }
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getSealerList")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getSealerList failed")
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
             }
 
-            _respFunc(_error, jResp);
+            m_respFunc(_error, jResp);
         });
 }
 
 void JsonRpcImpl_2_0::getObserverList(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getObserverList") << LOG_KV("group", _groupID)
                         << LOG_KV("group", _groupID) << LOG_KV("node", _nodeName);
@@ -970,33 +991,68 @@ void JsonRpcImpl_2_0::getObserverList(
     auto nodeService = getNodeService(_groupID, _nodeName, "getObserverList");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
-    ledger->asyncGetNodeListByType(bcos::ledger::CONSENSUS_OBSERVER,
-        [_respFunc](Error::Ptr _error, consensus::ConsensusNodeListPtr _consensusNodeListPtr) {
+    ledger->asyncGetNodeListByType(
+        bcos::ledger::CONSENSUS_OBSERVER, [m_respFunc = std::move(_respFunc)](Error::Ptr _error,
+                                              consensus::ConsensusNodeList _consensusNodeListPtr) {
             Json::Value jResp = Json::Value(Json::arrayValue);
             if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
             {
-                if (_consensusNodeListPtr)
+                for (const auto& consensusNodePtr : _consensusNodeListPtr)
                 {
-                    for (const auto& consensusNodePtr : *_consensusNodeListPtr)
-                    {
-                        jResp.append(consensusNodePtr->nodeID()->hex());
-                    }
+                    jResp.append(consensusNodePtr.nodeID->hex());
                 }
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getObserverList")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getObserverList failed")
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
             }
 
-            _respFunc(_error, jResp);
+            m_respFunc(_error, jResp);
+        });
+}
+
+void JsonRpcImpl_2_0::getNodeListByType(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _nodeType, bcos::rpc::RespFunc _respFunc)
+{
+    RPC_IMPL_LOG(TRACE) << LOG_BADGE("getNodeListByType") << LOG_KV("group", _groupID)
+                        << LOG_KV("group", _groupID) << LOG_KV("node", _nodeName)
+                        << LOG_KV("type", _nodeType);
+
+    auto nodeService = getNodeService(_groupID, _nodeName, "getNodeListByType");
+    auto ledger = nodeService->ledger();
+    checkService(ledger, "ledger");
+    ledger->asyncGetNodeListByType(
+        _nodeType, [m_respFunc = std::move(_respFunc)](
+                       Error::Ptr _error, consensus::ConsensusNodeList _consensusNodeListPtr) {
+            Json::Value jResp = Json::Value(Json::arrayValue);
+            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+            {
+                for (const auto& consensusNodePtr : _consensusNodeListPtr)
+                {
+                    Json::Value node;
+                    node["nodeID"] = consensusNodePtr.nodeID->hex();
+                    node["weight"] = consensusNodePtr.voteWeight;
+                    node["termWeight"] = consensusNodePtr.termWeight;
+                    jResp.append(node);
+                }
+            }
+            else
+            {
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getObserverList failed")
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
+            }
+
+            m_respFunc(_error, jResp);
         });
 }
 
 void JsonRpcImpl_2_0::getPbftView(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getPbftView") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
@@ -1004,27 +1060,26 @@ void JsonRpcImpl_2_0::getPbftView(
     auto nodeService = getNodeService(_groupID, _nodeName, "getPbftView");
     auto consensus = nodeService->consensus();
     checkService(consensus, "consensus");
-    consensus->asyncGetPBFTView(
-        [_respFunc](Error::Ptr _error, bcos::consensus::ViewType _viewValue) {
-            Json::Value jResp;
-            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
-            {
-                jResp = _viewValue;
-            }
-            else
-            {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getPbftView")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
-            }
+    consensus->asyncGetPBFTView([m_respFunc = std::move(_respFunc)](
+                                    Error::Ptr _error, bcos::consensus::ViewType _viewValue) {
+        Json::Value jResp;
+        if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+        {
+            jResp = _viewValue;
+        }
+        else
+        {
+            RPC_IMPL_LOG(INFO) << LOG_BADGE("getPbftView failed")
+                               << LOG_KV("code", _error ? _error->errorCode() : 0)
+                               << LOG_KV("message", _error ? _error->errorMessage() : "success");
+        }
 
-            _respFunc(_error, jResp);
-        });
+        m_respFunc(_error, jResp);
+    });
 }
 
 void JsonRpcImpl_2_0::getPendingTxSize(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getPendingTxSize") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
@@ -1032,7 +1087,8 @@ void JsonRpcImpl_2_0::getPendingTxSize(
     auto nodeService = getNodeService(_groupID, _nodeName, "getPendingTxSize");
     auto txpool = nodeService->txpool();
     checkService(txpool, "txpool");
-    txpool->asyncGetPendingTransactionSize([_respFunc](Error::Ptr _error, size_t _pendingTxSize) {
+    txpool->asyncGetPendingTransactionSize([m_respFunc = std::move(_respFunc)](
+                                               Error::Ptr _error, size_t _pendingTxSize) {
         Json::Value jResp;
         if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
         {
@@ -1040,18 +1096,17 @@ void JsonRpcImpl_2_0::getPendingTxSize(
         }
         else
         {
-            RPC_IMPL_LOG(ERROR) << LOG_BADGE("getPendingTxSize")
-                                << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                                << LOG_KV(
-                                       "errorMessage", _error ? _error->errorMessage() : "success");
+            RPC_IMPL_LOG(INFO) << LOG_BADGE("getPendingTxSize failed")
+                               << LOG_KV("code", _error ? _error->errorCode() : 0)
+                               << LOG_KV("message", _error ? _error->errorMessage() : "success");
         }
 
-        _respFunc(_error, jResp);
+        m_respFunc(_error, jResp);
     });
 }
 
 void JsonRpcImpl_2_0::getSyncStatus(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getSyncStatus") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
@@ -1059,7 +1114,8 @@ void JsonRpcImpl_2_0::getSyncStatus(
     auto nodeService = getNodeService(_groupID, _nodeName, "getSyncStatus");
     auto sync = nodeService->sync();
     checkService(sync, "sync");
-    sync->asyncGetSyncInfo([_respFunc](Error::Ptr _error, std::string _syncStatus) {
+    sync->asyncGetSyncInfo([m_respFunc = std::move(_respFunc)](
+                               Error::Ptr _error, std::string _syncStatus) {
         Json::Value jResp;
         if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
         {
@@ -1067,17 +1123,16 @@ void JsonRpcImpl_2_0::getSyncStatus(
         }
         else
         {
-            RPC_IMPL_LOG(ERROR) << LOG_BADGE("getSyncStatus")
-                                << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                                << LOG_KV(
-                                       "errorMessage", _error ? _error->errorMessage() : "success");
+            RPC_IMPL_LOG(INFO) << LOG_BADGE("getSyncStatus failed")
+                               << LOG_KV("code", _error ? _error->errorCode() : 0)
+                               << LOG_KV("message", _error ? _error->errorMessage() : "success");
         }
-        _respFunc(_error, jResp);
+        m_respFunc(_error, jResp);
     });
 }
 
 void JsonRpcImpl_2_0::getConsensusStatus(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_BADGE("getConsensusStatus") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
@@ -1085,26 +1140,25 @@ void JsonRpcImpl_2_0::getConsensusStatus(
     auto nodeService = getNodeService(_groupID, _nodeName, "getConsensusStatus");
     auto consensus = nodeService->consensus();
     checkService(consensus, "consensus");
-    consensus->asyncGetConsensusStatus(
-        [_respFunc](Error::Ptr _error, std::string _consensusStatus) {
-            Json::Value jResp;
-            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
-            {
-                jResp = _consensusStatus;
-            }
-            else
-            {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getConsensusStatus")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
-            }
-            _respFunc(_error, jResp);
-        });
+    consensus->asyncGetConsensusStatus([m_respFunc = std::move(_respFunc)](
+                                           Error::Ptr _error, std::string _consensusStatus) {
+        Json::Value jResp;
+        if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+        {
+            jResp = _consensusStatus;
+        }
+        else
+        {
+            RPC_IMPL_LOG(INFO) << LOG_BADGE("getConsensusStatus failed")
+                               << LOG_KV("code", _error ? _error->errorCode() : 0)
+                               << LOG_KV("message", _error ? _error->errorMessage() : "success");
+        }
+        m_respFunc(_error, jResp);
+    });
 }
 
-void JsonRpcImpl_2_0::getSystemConfigByKey(std::string const& _groupID,
-    std::string const& _nodeName, const std::string& _keyValue, RespFunc _respFunc)
+void JsonRpcImpl_2_0::getSystemConfigByKey(std::string_view _groupID, std::string_view _nodeName,
+    std::string_view _keyValue, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getSystemConfigByKey") << LOG_KV("keyValue", _keyValue)
                         << LOG_KV("group", _groupID) << LOG_KV("node", _nodeName);
@@ -1112,8 +1166,9 @@ void JsonRpcImpl_2_0::getSystemConfigByKey(std::string const& _groupID,
     auto nodeService = getNodeService(_groupID, _nodeName, "getSystemConfigByKey");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
-    ledger->asyncGetSystemConfigByKey(_keyValue,
-        [_respFunc](Error::Ptr _error, std::string _value, protocol::BlockNumber _blockNumber) {
+    ledger->asyncGetSystemConfigByKey(
+        _keyValue, [m_respFunc = std::move(_respFunc)](
+                       Error::Ptr _error, std::string _value, protocol::BlockNumber _blockNumber) {
             Json::Value jResp;
             if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
             {
@@ -1122,18 +1177,18 @@ void JsonRpcImpl_2_0::getSystemConfigByKey(std::string const& _groupID,
             }
             else
             {
-                RPC_IMPL_LOG(ERROR)
+                RPC_IMPL_LOG(INFO)
                     << LOG_BADGE("asyncGetSystemConfigByKey")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
             }
 
-            _respFunc(_error, jResp);
+            m_respFunc(_error, jResp);
         });
 }
 
 void JsonRpcImpl_2_0::getTotalTransactionCount(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getTotalTransactionCount") << LOG_KV("group", _groupID)
                         << LOG_KV("node", _nodeName);
@@ -1141,52 +1196,56 @@ void JsonRpcImpl_2_0::getTotalTransactionCount(
     auto nodeService = getNodeService(_groupID, _nodeName, "getTotalTransactionCount");
     auto ledger = nodeService->ledger();
     checkService(ledger, "ledger");
-    ledger->asyncGetTotalTransactionCount(
-        [_respFunc](Error::Ptr _error, int64_t _totalTxCount, int64_t _failedTxCount,
-            protocol::BlockNumber _latestBlockNumber) {
-            Json::Value jResp;
-            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
-            {
-                jResp["blockNumber"] = _latestBlockNumber;
-                jResp["transactionCount"] = _totalTxCount;
-                jResp["failedTransactionCount"] = _failedTxCount;
-            }
-            else
-            {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getTotalTransactionCount")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
-            }
+    ledger->asyncGetTotalTransactionCount([m_respFunc = std::move(_respFunc)](Error::Ptr _error,
+                                              int64_t _totalTxCount, int64_t _failedTxCount,
+                                              protocol::BlockNumber _latestBlockNumber) {
+        Json::Value jResp;
+        if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+        {
+            jResp["blockNumber"] = _latestBlockNumber;
+            jResp["transactionCount"] = _totalTxCount;
+            jResp["failedTransactionCount"] = _failedTxCount;
+        }
+        else
+        {
+            RPC_IMPL_LOG(INFO) << LOG_BADGE("getTotalTransactionCount failed")
+                               << LOG_KV("code", _error ? _error->errorCode() : 0)
+                               << LOG_KV("message", _error ? _error->errorMessage() : "success");
+        }
 
-            _respFunc(_error, jResp);
-        });
+        m_respFunc(_error, jResp);
+    });
 }
 void JsonRpcImpl_2_0::getPeers(RespFunc _respFunc)
 {
     RPC_IMPL_LOG(TRACE) << LOG_DESC("getPeers");
-    m_gatewayInterface->asyncGetPeers(
-        [this, _respFunc](Error::Ptr _error, bcos::gateway::GatewayInfo::Ptr _localP2pInfo,
-            bcos::gateway::GatewayInfosPtr _peersInfo) {
-            Json::Value jResp;
-            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
-            {
-                gatewayInfoToJson(jResp, _localP2pInfo, _peersInfo);
-            }
-            else
-            {
-                RPC_IMPL_LOG(ERROR)
-                    << LOG_BADGE("getPeers")
-                    << LOG_KV("errorCode", _error ? _error->errorCode() : 0)
-                    << LOG_KV("errorMessage", _error ? _error->errorMessage() : "success");
-            }
+    auto self = std::weak_ptr<JsonRpcImpl_2_0>(shared_from_this());
+    m_gatewayInterface->asyncGetPeers([m_respFunc = std::move(_respFunc), self](Error::Ptr _error,
+                                          bcos::gateway::GatewayInfo::Ptr _localP2pInfo,
+                                          bcos::gateway::GatewayInfosPtr _peersInfo) {
+        auto rpc = self.lock();
+        if (!rpc)
+        {
+            return;
+        }
+        Json::Value jResp;
+        if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+        {
+            rpc->gatewayInfoToJson(jResp, _localP2pInfo, _peersInfo);
+        }
+        else
+        {
+            RPC_IMPL_LOG(INFO) << LOG_BADGE("getPeers failed")
+                               << LOG_KV("code", _error ? _error->errorCode() : 0)
+                               << LOG_KV("message", _error ? _error->errorMessage() : "success");
+        }
 
-            _respFunc(_error, jResp);
-        });
+        m_respFunc(_error, jResp);
+    });
 }
 
 NodeService::Ptr JsonRpcImpl_2_0::getNodeService(
-    std::string const& _groupID, std::string const& _nodeName, std::string const& _command)
+    std::string_view _groupID, std::string_view _nodeName, std::string_view _command)
 {
     auto nodeService = m_groupManager->getNodeService(_groupID, _nodeName);
     if (!nodeService)
@@ -1217,14 +1276,14 @@ void JsonRpcImpl_2_0::getGroupList(RespFunc _respFunc)
 }
 
 // get the group information of the given group
-void JsonRpcImpl_2_0::getGroupInfo(std::string const& _groupID, RespFunc _respFunc)
+void JsonRpcImpl_2_0::getGroupInfo(std::string_view _groupID, RespFunc _respFunc)
 {
     auto groupInfo = m_groupManager->getGroupInfo(_groupID);
     Json::Value response;
     if (groupInfo)
     {
         // can only recover the deleted group
-        groupInfoToJson(response, groupInfo);
+        groupInfoToJson(response, *groupInfo);
     }
     _respFunc(nullptr, response);
 }
@@ -1263,7 +1322,7 @@ void JsonRpcImpl_2_0::getGroupBlockNumber(RespFunc _respFunc)
 
 // get the information of a given node
 void JsonRpcImpl_2_0::getGroupNodeInfo(
-    std::string const& _groupID, std::string const& _nodeName, RespFunc _respFunc)
+    std::string_view _groupID, std::string_view _nodeName, RespFunc _respFunc)
 {
     auto nodeInfo = m_groupManager->getNodeInfo(_groupID, _nodeName);
     Json::Value response;
@@ -1279,8 +1338,11 @@ void JsonRpcImpl_2_0::gatewayInfoToJson(
 {
     auto p2pInfo = _gatewayInfo->p2pInfo();
     _response["p2pNodeID"] = p2pInfo.p2pID;
-    _response["endPoint"] =
-        p2pInfo.nodeIPEndpoint.address() + ":" + std::to_string(p2pInfo.nodeIPEndpoint.port());
+    if (!p2pInfo.nodeIPEndpoint.address().empty())
+    {
+        _response["endPoint"] =
+            p2pInfo.nodeIPEndpoint.address() + ":" + std::to_string(p2pInfo.nodeIPEndpoint.port());
+    }
     // set the groupNodeIDInfo
     auto groupNodeIDInfo = _gatewayInfo->nodeIDInfo();
     Json::Value groupInfo(Json::arrayValue);
@@ -1288,11 +1350,11 @@ void JsonRpcImpl_2_0::gatewayInfoToJson(
     {
         Json::Value item;
         item["group"] = it.first;
-        auto const& nodeIDList = it.second;
+        auto const& nodeIDInfos = it.second;
         Json::Value nodeIDInfo(Json::arrayValue);
-        for (auto const& nodeID : nodeIDList)
+        for (auto const& nodeInfo : nodeIDInfos)
         {
-            nodeIDInfo.append(Json::Value(nodeID));
+            nodeIDInfo.append(Json::Value(nodeInfo.first));
         }
         item["nodeIDList"] = nodeIDInfo;
         groupInfo.append(item);
@@ -1321,7 +1383,7 @@ void JsonRpcImpl_2_0::gatewayInfoToJson(Json::Value& _response,
     _response["peers"] = peersInfo;
 }
 
-void JsonRpcImpl_2_0::getGroupPeers(Json::Value& _response, std::string const& _groupID,
+void JsonRpcImpl_2_0::getGroupPeers(Json::Value& _response, std::string_view _groupID,
     bcos::gateway::GatewayInfo::Ptr _localP2pInfo, bcos::gateway::GatewayInfosPtr _peersInfo)
 {
     _peersInfo->emplace_back(_localP2pInfo);
@@ -1329,15 +1391,23 @@ void JsonRpcImpl_2_0::getGroupPeers(Json::Value& _response, std::string const& _
     for (auto const& info : *_peersInfo)
     {
         auto groupNodeIDInfo = info->nodeIDInfo();
-        if (groupNodeIDInfo.count(_groupID))
+        for (auto const& nodeIDInfo : groupNodeIDInfo)
         {
-            auto const& nodeList = groupNodeIDInfo.at(_groupID);
-            for (auto const& node : nodeList)
+            auto groupID = nodeIDInfo.first;
+
+            if (_groupID != groupID)
             {
-                nodeIDList.insert(node);
+                continue;
+            }
+
+            auto nodeInfo = nodeIDInfo.second;
+            for (auto const& peerInfo : nodeInfo)
+            {
+                nodeIDList.insert(peerInfo.first);
             }
         }
     }
+
     if (nodeIDList.size() == 0)
     {
         return;
@@ -1348,20 +1418,125 @@ void JsonRpcImpl_2_0::getGroupPeers(Json::Value& _response, std::string const& _
     }
 }
 
-void JsonRpcImpl_2_0::getGroupPeers(std::string const& _groupID, RespFunc _respFunc)
+void JsonRpcImpl_2_0::getGroupPeers(std::string_view _groupID, RespFunc _respFunc)
 {
-    m_gatewayInterface->asyncGetPeers([_respFunc, _groupID, this](Error::Ptr _error,
-                                          bcos::gateway::GatewayInfo::Ptr _localP2pInfo,
-                                          bcos::gateway::GatewayInfosPtr _peersInfo) {
-        Json::Value jResp;
-        if (_error)
-        {
-            RPC_IMPL_LOG(ERROR) << LOG_BADGE("getGroupPeers") << LOG_KV("code", _error->errorCode())
-                                << LOG_KV("message", _error->errorMessage());
+    auto self = std::weak_ptr<JsonRpcImpl_2_0>(shared_from_this());
+    m_gatewayInterface->asyncGetPeers(
+        [_respFunc, group = std::string(_groupID), self](Error::Ptr _error,
+            bcos::gateway::GatewayInfo::Ptr _localP2pInfo,
+            bcos::gateway::GatewayInfosPtr _peersInfo) {
+            Json::Value jResp(Json::arrayValue);
+            if (_error)
+            {
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("getGroupPeers failed") << LOG_KV("code", _error->errorCode())
+                    << LOG_KV("message", _error->errorMessage());
+                _respFunc(_error, jResp);
+                return;
+            }
+            auto rpc = self.lock();
+            if (!rpc)
+            {
+                return;
+            }
+            rpc->getGroupPeers(jResp, std::string_view(group), _localP2pInfo, _peersInfo);
             _respFunc(_error, jResp);
-            return;
-        }
-        getGroupPeers(jResp, _groupID, _localP2pInfo, _peersInfo);
-        _respFunc(_error, jResp);
-    });
+        });
+}
+
+void JsonRpcImpl_2_0::newBlockFilter(std::string_view _groupID, RespFunc _respFunc)
+{
+    task::wait(
+        [](JsonRpcImpl_2_0* self, std::string_view groupID, RespFunc respFunc) -> task::Task<void> {
+            Json::Value jRes = co_await self->filterSystem().newBlockFilter(groupID);
+            respFunc(nullptr, jRes);
+        }(this, _groupID, std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::newPendingTransactionFilter(std::string_view _groupID, RespFunc _respFunc)
+{
+    task::wait(
+        [](JsonRpcImpl_2_0* self, std::string_view groupID, RespFunc respFunc) -> task::Task<void> {
+            Json::Value jRes = co_await self->filterSystem().newPendingTxFilter(groupID);
+            respFunc(nullptr, jRes);
+        }(this, _groupID, std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::newFilter(
+    std::string_view _groupID, const Json::Value& jParams, RespFunc _respFunc)
+{
+    task::wait([&jParams](JsonRpcImpl_2_0* self, std::string_view groupID,
+                   RespFunc respFunc) -> task::Task<void> {
+        Json::Value jRes;
+        auto params = self->filterSystem().requestFactory()->create();
+        params->fromJson(jParams);
+        jRes = co_await self->filterSystem().newFilter(groupID, std::move(params));
+        respFunc(nullptr, jRes);
+    }(this, _groupID, std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::uninstallFilter(
+    std::string_view _groupID, std::string_view filterID, RespFunc _respFunc)
+{
+    task::wait([](JsonRpcImpl_2_0* self, std::string_view groupID, u256 id,
+                   RespFunc respFunc) -> task::Task<void> {
+        Json::Value jRes = co_await self->filterSystem().uninstallFilter(groupID, id);
+        respFunc(nullptr, jRes);
+    }(this, _groupID, fromBigQuantity(filterID), std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::getFilterChanges(
+    std::string_view _groupID, std::string_view filterID, RespFunc _respFunc)
+{
+    task::wait([](JsonRpcImpl_2_0* self, std::string_view groupID, u256 id,
+                   RespFunc respFunc) -> task::Task<void> {
+        Json::Value jRes = co_await self->filterSystem().getFilterChanges(groupID, id);
+        respFunc(nullptr, jRes);
+    }(this, _groupID, fromBigQuantity(filterID), std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::getFilterLogs(
+    std::string_view _groupID, std::string_view filterID, RespFunc _respFunc)
+{
+    task::wait([](JsonRpcImpl_2_0* self, std::string_view groupID, u256 id,
+                   RespFunc respFunc) -> task::Task<void> {
+        Json::Value jRes = co_await self->filterSystem().getFilterLogs(groupID, id);
+        respFunc(nullptr, jRes);
+    }(this, _groupID, fromBigQuantity(filterID), std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::getLogs(
+    std::string_view _groupID, const Json::Value& jParams, RespFunc _respFunc)
+{
+    task::wait([](JsonRpcImpl_2_0* self, std::string_view groupID, const Json::Value& jParams,
+                   RespFunc respFunc) -> task::Task<void> {
+        auto params = self->filterSystem().requestFactory()->create();
+        params->fromJson(jParams);
+        Json::Value jRes = co_await self->filterSystem().getLogs(groupID, std::move(params));
+        respFunc(nullptr, jRes);
+    }(this, _groupID, jParams, std::move(_respFunc)));
+}
+
+void JsonRpcImpl_2_0::execCall(
+    NodeService::Ptr nodeService, protocol::Transaction::Ptr _tx, bcos::rpc::RespFunc _respFunc)
+{
+    nodeService->scheduler()->call(
+        _tx, [m_to = std::string(_tx->to()), m_respFunc = std::move(_respFunc)](
+                 Error::Ptr&& _error, protocol::TransactionReceipt::Ptr&& _transactionReceiptPtr) {
+            Json::Value jResp;
+            if (!_error || (_error->errorCode() == bcos::protocol::CommonError::SUCCESS))
+            {
+                jResp["blockNumber"] = _transactionReceiptPtr->blockNumber();
+                jResp["status"] = _transactionReceiptPtr->status();
+                jResp["output"] = toHexStringWithPrefix(_transactionReceiptPtr->output());
+            }
+            else
+            {
+                RPC_IMPL_LOG(INFO)
+                    << LOG_BADGE("call failed") << LOG_KV("to", m_to)
+                    << LOG_KV("code", _error ? _error->errorCode() : 0)
+                    << LOG_KV("message", _error ? _error->errorMessage() : "success");
+            }
+            m_respFunc(_error, jResp);
+        });
 }

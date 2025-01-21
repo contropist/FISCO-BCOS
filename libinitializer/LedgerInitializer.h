@@ -19,10 +19,12 @@
  * @date 2021-06-10
  */
 #pragma once
-#include <bcos-framework/interfaces/ledger/LedgerInterface.h>
-#include <bcos-framework/interfaces/protocol/BlockFactory.h>
-#include <bcos-framework/interfaces/storage/StorageInterface.h>
-#include <bcos-ledger/src/libledger/Ledger.h>
+#include "bcos-crypto/hasher/OpenSSLHasher.h"
+#include <bcos-framework/ledger/LedgerInterface.h>
+#include <bcos-framework/protocol/BlockFactory.h>
+#include <bcos-framework/storage/StorageInterface.h>
+#include <bcos-ledger/LedgerImpl.h>
+#include <bcos-storage/StorageWrapperImpl.h>
 #include <bcos-tool/NodeConfig.h>
 
 namespace bcos::initializer
@@ -31,13 +33,30 @@ class LedgerInitializer
 {
 public:
     static std::shared_ptr<bcos::ledger::Ledger> build(
-        bcos::protocol::BlockFactory::Ptr _blockFactory,
-        bcos::storage::StorageInterface::Ptr _storage, bcos::tool::NodeConfig::Ptr _nodeConfig)
+        bcos::protocol::BlockFactory::Ptr blockFactory,
+        bcos::storage::StorageInterface::Ptr storage, bcos::tool::NodeConfig::Ptr nodeConfig,
+        bcos::storage::StorageInterface::Ptr blockStorage)
     {
-        auto ledger = std::make_shared<bcos::ledger::Ledger>(_blockFactory, _storage);
-        // build genesis block
-        ledger->buildGenesisBlock(
-            _nodeConfig->ledgerConfig(), _nodeConfig->txGasLimit(), _nodeConfig->genesisData());
+        bcos::storage::StorageImpl storageWrapper(storage);
+        std::shared_ptr<bcos::ledger::Ledger> ledger;
+        if (nodeConfig->smCryptoType())
+        {
+            ledger = std::make_shared<bcos::ledger::LedgerImpl<
+                bcos::crypto::hasher::openssl::OpenSSL_SM3_Hasher, decltype(storageWrapper)>>(
+                bcos::crypto::hasher::openssl::OpenSSL_SM3_Hasher{}, std::move(storageWrapper),
+                blockFactory, storage, nodeConfig->blockLimit(), blockStorage);
+        }
+        else
+        {
+            ledger = std::make_shared<bcos::ledger::LedgerImpl<
+                bcos::crypto::hasher::openssl::OpenSSL_Keccak256_Hasher, decltype(storageWrapper)>>(
+                bcos::crypto::hasher::openssl::OpenSSL_Keccak256_Hasher{},
+                std::move(storageWrapper), blockFactory, storage, nodeConfig->blockLimit(),
+                blockStorage);
+        }
+
+        ledger->buildGenesisBlock(nodeConfig->genesisConfig(), *nodeConfig->ledgerConfig());
+
         return ledger;
     }
 };

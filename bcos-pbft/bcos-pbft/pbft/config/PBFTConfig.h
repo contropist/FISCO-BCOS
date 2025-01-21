@@ -19,21 +19,21 @@
  * @date 2021-04-12
  */
 #pragma once
+#include "bcos-framework/consensus/StateMachineInterface.h"
+#include "bcos-framework/ledger/LedgerTypeDef.h"
 #include "bcos-pbft/core/ConsensusConfig.h"
-#include "bcos-pbft/framework/StateMachineInterface.h"
 #include "bcos-pbft/pbft/engine/PBFTTimer.h"
 #include "bcos-pbft/pbft/engine/Validator.h"
 #include "bcos-pbft/pbft/interfaces/PBFTCodecInterface.h"
 #include "bcos-pbft/pbft/interfaces/PBFTMessageFactory.h"
 #include "bcos-pbft/pbft/interfaces/PBFTStorage.h"
 #include "bcos-pbft/pbft/utilities/Common.h"
+#include "bcos-rpbft/rpbft/config/RPBFTConfigTools.h"
 #include <bcos-crypto/interfaces/crypto/CryptoSuite.h>
-#include <bcos-framework/interfaces/front/FrontServiceInterface.h>
-#include <bcos-framework/interfaces/sync/BlockSyncInterface.h>
+#include <bcos-framework/front/FrontServiceInterface.h>
+#include <bcos-framework/sync/BlockSyncInterface.h>
 
-namespace bcos
-{
-namespace consensus
+namespace bcos::consensus
 {
 class PBFTConfig : public ConsensusConfig, public std::enable_shared_from_this<PBFTConfig>
 {
@@ -44,20 +44,25 @@ public:
         std::shared_ptr<PBFTMessageFactory> _pbftMessageFactory,
         std::shared_ptr<PBFTCodecInterface> _codec, std::shared_ptr<ValidatorInterface> _validator,
         std::shared_ptr<bcos::front::FrontServiceInterface> _frontService,
-        StateMachineInterface::Ptr _stateMachine, PBFTStorage::Ptr _storage)
-      : ConsensusConfig(_keyPair), m_connectedNodeList(std::make_shared<bcos::crypto::NodeIDSet>())
+        StateMachineInterface::Ptr _stateMachine, PBFTStorage::Ptr _storage,
+        bcos::protocol::BlockFactory::Ptr _blockFactory)
+      : ConsensusConfig(std::move(_keyPair)),
+        m_cryptoSuite(std::move(_cryptoSuite)),
+        m_pbftMessageFactory(std::move(_pbftMessageFactory)),
+        m_codec(std::move(_codec)),
+        m_validator(std::move(_validator)),
+        m_frontService(std::move(_frontService)),
+        m_stateMachine(std::move(_stateMachine)),
+        m_storage(std::move(_storage)),
+        m_connectedNodeList(std::make_shared<bcos::crypto::NodeIDSet>()),
+        m_blockFactory(std::move(_blockFactory))
     {
-        m_cryptoSuite = _cryptoSuite;
-        m_pbftMessageFactory = _pbftMessageFactory;
-        m_codec = _codec;
-        m_validator = _validator;
-        m_frontService = _frontService;
-        m_stateMachine = _stateMachine;
-        m_storage = _storage;
-        m_timer = std::make_shared<PBFTTimer>(consensusTimeout());
+        m_pbftTimer = std::make_shared<PBFTTimer>(consensusTimeout(), "pbftTimer");
+        // Note: the pullTxsTimeout must be smaller than consensusTimeout to fetch txs before
+        // viewchange when there has no-synced txs pullTxsTimeout is larger than 3000ms
     }
 
-    ~PBFTConfig() override {}
+    ~PBFTConfig() override = default;
 
     virtual void stop()
     {
@@ -67,9 +72,17 @@ public:
             m_validator->stop();
         }
         // destroy the timer
-        if (m_timer)
+        if (m_pbftTimer)
         {
-            m_timer->destroy();
+            m_pbftTimer->destroy();
+        }
+        if (m_stateMachine)
+        {
+            m_stateMachine->stop();
+        }
+        if (m_storage)
+        {
+            m_storage->stop();
         }
     }
     virtual void resetConfig(
@@ -99,7 +112,8 @@ public:
         m_leaderSwitchPeriod.store(_leaderSwitchPeriod);
         // notify the sealer module to reset sealing
         notifyResetSealing(sealStartIndex());
-        PBFT_LOG(INFO) << LOG_DESC(
+        PBFT_LOG(INFO) << METRIC
+                       << LOG_DESC(
                               "updateLeaderSwitchPeriod and re-notify the sealer to seal block")
                        << LOG_KV("leader_period", m_leaderSwitchPeriod)
                        << LOG_KV("committedIndex", committedProposal()->index());
@@ -121,12 +135,12 @@ public:
     int64_t lowWaterMark() { return m_lowWaterMark; }
     void setLowWaterMark(bcos::protocol::BlockNumber _index) { m_lowWaterMark = _index; }
 
-    PBFTTimer::Ptr timer() { return m_timer; }
+    PBFTTimer::Ptr timer() { return m_pbftTimer; }
 
     void setConsensusTimeout(uint64_t _consensusTimeout) override
     {
         ConsensusConfig::setConsensusTimeout(_consensusTimeout);
-        m_timer->reset(_consensusTimeout);
+        m_pbftTimer->reset(_consensusTimeout);
     }
 
     void setCommittedProposal(ProposalInterface::Ptr _committedProposal) override
@@ -167,8 +181,8 @@ public:
     void resetToView()
     {
         m_toView.store(m_view);
-        m_timer->resetChangeCycle();
-        m_timeoutState.store(false);
+        m_pbftTimer->resetChangeCycle();
+        setTimeoutState(false);
     }
 
     uint64_t maxFaultyQuorum() const { return m_maxFaultyQuorum; }
@@ -177,20 +191,23 @@ public:
     virtual void reNotifySealer(bcos::protocol::BlockNumber _index);
     virtual bool shouldResetConfig(bcos::protocol::BlockNumber _index)
     {
-        ReadGuard l(x_committedProposal);
+        ReadGuard lock(x_committedProposal);
         if (!m_committedProposal)
         {
             return false;
         }
-        return m_committedProposal->index() < _index;
+        // Note: If the consensus and blockSync are executing the same block at the same time,
+        // the blockSync is executed first, and the consensus is still executing, the cache
+        // should be cleared.
+        return m_committedProposal->index() <= _index;
     }
 
-    virtual void setTimeoutState(bool _timeoutState) { m_timeoutState = _timeoutState; }
+    virtual void setTimeoutState(bool _timeoutState) { m_timeoutState.store(_timeoutState); }
     virtual bool timeout() { return m_timeoutState; }
 
     virtual void resetTimeoutState(bool _incTimeout = true)
     {
-        m_timeoutState.store(true);
+        setTimeoutState(true);
         // update toView
         incToView(1);
         if (_incTimeout)
@@ -198,86 +215,88 @@ public:
             // increase the changeCycle
             timer()->incChangeCycle(1);
         }
+        // drop in view change status, set consensus timeout as min seal time
+        // NOTE: if consensusTimeout == minSealTime, and all nodes use same long minSealTime
+        // leader will use minSealTime to seal a proposal, and follower will be timeout after
+        // consensusTimeout, it will cause never reach consensus.
+        setConsensusTimeout(
+            std::max(m_consensusTimeout.load(), (uint64_t)m_minSealTime.load() + 1));
         // start the timer again(the timer here must be restarted)
         timer()->restart();
     }
 
     virtual void resetNewViewState(ViewType _view)
     {
+        PBFT_LOG(INFO) << LOG_DESC("resetNewViewState") << LOG_KV("m_view", m_view)
+                       << LOG_KV("_view", _view);
         if (m_view > _view)
         {
             return;
         }
-        if (m_startRecovered.load() == false)
+        if (!m_startRecovered.load())
         {
             m_startRecovered.store(true);
         }
         // reset the timer when reach a new-view
-        m_timeoutState.store(false);
+        setTimeoutState(false);
+        // reach new view, consensus time recovery to normal
+        // NOTE: should not recover when reach new view
+        // if all nodes reach new view, and set consensusTimeout to 3000
+        // and all nodes minSealTime > 3000, it will cause consensus always be timeout
+        //        setConsensusTimeout(s_consensusTimeout);
         freshTimer();
         // update the changeCycle
         timer()->resetChangeCycle();
         setView(_view);
         setToView(_view);
-        m_timeoutState.store(false);
-    }
-    virtual void setUnSealedTxsSize(size_t _unsealedTxsSize)
-    {
-        m_unsealedTxsSize = _unsealedTxsSize;
-        if (m_unsealedTxsSize > 0 && !m_timer->running())
-        {
-            m_timer->start();
-        }
+        setTimeoutState(false);
     }
 
-    virtual void freshTimer()
-    {
-        if (m_unsealedTxsSize > 0)
-        {
-            m_timer->restart();
-        }
-        else
-        {
-            m_timer->stop();
-        }
-    }
+    virtual void freshTimer() { m_pbftTimer->restart(); }
 
     void registerSealProposalNotifier(
         std::function<void(size_t, size_t, size_t, std::function<void(Error::Ptr)>)>
             _sealProposalNotifier)
     {
-        m_sealProposalNotifier = _sealProposalNotifier;
+        m_sealProposalNotifier = std::move(_sealProposalNotifier);
     }
 
-    void registerStateNotifier(std::function<void(bcos::protocol::BlockNumber)> _stateNotifier)
+    void registerStateNotifier(
+        std::function<void(bcos::protocol::BlockNumber, crypto::HashType const&)> _stateNotifier)
     {
-        m_stateNotifier = _stateNotifier;
+        m_stateNotifier = std::move(_stateNotifier);
     }
 
     void registerNewBlockNotifier(
         std::function<void(bcos::ledger::LedgerConfig::Ptr, std::function<void(Error::Ptr)>)>
             _newBlockNotifier)
     {
-        m_newBlockNotifier = _newBlockNotifier;
+        m_newBlockNotifier = std::move(_newBlockNotifier);
     }
 
     void registerSealerResetNotifier(
         std::function<void(std::function<void(Error::Ptr)>)> _sealerResetNotifier)
     {
-        m_sealerResetNotifier = _sealerResetNotifier;
+        m_sealerResetNotifier = std::move(_sealerResetNotifier);
     }
 
     void registerFaultyDiscriminator(
         std::function<bool(bcos::crypto::NodeIDPtr)> _faultyDiscriminator)
     {
-        m_faultyDiscriminator = _faultyDiscriminator;
+        m_faultyDiscriminator = std::move(_faultyDiscriminator);
     }
 
     virtual void notifyResetSealing(bcos::protocol::BlockNumber _consIndex)
     {
-        notifyResetSealing([this, _consIndex]() {
+        auto self = weak_from_this();
+        notifyResetSealing([self, _consIndex]() {
+            auto config = self.lock();
+            if (!config)
+            {
+                return;
+            }
             // notify the sealer to reseal
-            reNotifySealer(_consIndex);
+            config->reNotifySealer(_consIndex);
         });
     }
 
@@ -293,10 +312,10 @@ public:
         m_waitSealUntil = std::max(m_waitSealUntil.load(), _waitSealUntil);
     }
 
-    void setConsensusNodeList(ConsensusNodeList& _consensusNodeList) override
+    void setConsensusNodeList(ConsensusNodeList _consensusNodeList) override
     {
         ConsensusConfig::setConsensusNodeList(_consensusNodeList);
-        if (!m_nodeUpdated)
+        if (!m_consensusNodeListUpdated)
         {
             return;
         }
@@ -321,23 +340,25 @@ public:
 
     void registerFastViewChangeHandler(std::function<void()> _fastViewChangeHandler)
     {
-        m_fastViewChangeHandler = _fastViewChangeHandler;
+        m_fastViewChangeHandler = std::move(_fastViewChangeHandler);
     }
 
     virtual void setConnectedNodeList(bcos::crypto::NodeIDSet&& _connectedNodeList)
     {
-        WriteGuard l(x_connectedNodeList);
+        WriteGuard lock(x_connectedNodeList);
         *m_connectedNodeList = std::move(_connectedNodeList);
+        PBFT_LOG(INFO) << LOG_DESC("setConnectedNodeList")
+                       << LOG_KV("size", m_connectedNodeList->size());
     }
     virtual void setConnectedNodeList(bcos::crypto::NodeIDSet const& _connectedNodeList)
     {
-        WriteGuard l(x_connectedNodeList);
+        WriteGuard lock(x_connectedNodeList);
         *m_connectedNodeList = _connectedNodeList;
     }
 
     virtual bcos::crypto::NodeIDSet connectedNodeList()
     {
-        ReadGuard l(x_connectedNodeList);
+        ReadGuard lock(x_connectedNodeList);
         return *m_connectedNodeList;
     }
 
@@ -349,13 +370,32 @@ public:
 
     bcos::protocol::BlockNumber waitSealUntil() { return m_waitSealUntil; }
 
+    void setMinSealTime(int64_t _minSealTime) noexcept { this->m_minSealTime = _minSealTime; }
+    void setPipeLineSize(int64_t _pipeSize) noexcept { this->m_waterMarkLimit = _pipeSize; }
+
+    void registerTxsStatusSyncHandler(std::function<void()> const& _txsStatusSyncHandler)
+    {
+        m_txsStatusSyncHandler = _txsStatusSyncHandler;
+    }
+
+    void setConsensusType(ledger::ConsensusType _type) { m_type = _type; }
+    ledger::ConsensusType consensusType() const noexcept { return m_type; }
+
+    bcos::protocol::BlockFactory& blockFactory() const noexcept { return *m_blockFactory; }
+
+    void setRPBFTConfigTools(RPBFTConfigTools::Ptr _config)
+    {
+        m_rpbftConfigTools = std::move(_config);
+    }
+    virtual RPBFTConfigTools::Ptr rpbftConfigTools() const noexcept { return m_rpbftConfigTools; }
+
 protected:
     void updateQuorum() override;
     virtual void asyncNotifySealProposal(size_t _proposalIndex, size_t _proposalEndIndex,
         size_t _maxTxsToSeal, size_t _retryTime = 0);
 
+    void tryToSyncTxs();
 
-protected:
     bcos::crypto::CryptoSuite::Ptr m_cryptoSuite;
     // Factory for creating PBFT message package
     std::shared_ptr<PBFTMessageFactory> m_pbftMessageFactory;
@@ -367,8 +407,8 @@ protected:
     std::shared_ptr<bcos::front::FrontServiceInterface> m_frontService;
     StateMachineInterface::Ptr m_stateMachine;
     PBFTStorage::Ptr m_storage;
-    // Timer
-    PBFTTimer::Ptr m_timer;
+    // Timer, for pbft consensus
+    PBFTTimer::Ptr m_pbftTimer;
     // notify the sealer seal Proposal
     std::function<void(size_t, size_t, size_t, std::function<void(Error::Ptr)>)>
         m_sealProposalNotifier;
@@ -376,7 +416,7 @@ protected:
     std::function<void(std::function<void(Error::Ptr)>)> m_sealerResetNotifier;
 
     // notify the sealer the latest blockNumber
-    std::function<void(bcos::protocol::BlockNumber)> m_stateNotifier;
+    std::function<void(bcos::protocol::BlockNumber, crypto::HashType const&)> m_stateNotifier;
     // the sync module notify the consensus module the new block
     std::function<void(bcos::ledger::LedgerConfig::Ptr, std::function<void(Error::Ptr)>)>
         m_newBlockNotifier;
@@ -392,19 +432,21 @@ protected:
     std::atomic<bcos::protocol::BlockNumber> m_sealStartIndex = {0};
     std::atomic<bcos::protocol::BlockNumber> m_sealEndIndex = {0};
 
-    int64_t m_waterMarkLimit = 10;
+    int64_t m_waterMarkLimit = 50;
     std::atomic<int64_t> m_checkPointTimeoutInterval = {3000};
+    std::atomic<int64_t> m_minSealTime = {3000};
 
     std::atomic<uint64_t> m_leaderSwitchPeriod = {1};
     const unsigned c_pbftMsgDefaultVersion = 0;
     const unsigned c_networkTimeoutInterval = 1000;
-    // state variable that identifies whether has timed out
+    // state variable that identifies whether it has timed out
     std::atomic_bool m_timeoutState = {false};
+    std::atomic_bool m_startRecovered = {false};
+    bcos::ledger::ConsensusType m_type = bcos::ledger::ConsensusType::PBFT_TYPE;
 
-    std::atomic<size_t> m_unsealedTxsSize = {0};
     // notify the sealer to reseal new block until m_waitResealUntil stable committed
     std::atomic<bcos::protocol::BlockNumber> m_waitResealUntil = {0};
-    // notify the ealer to seal new block until m_waitSealUntil committed
+    // notify the sealer to seal new block until m_waitSealUntil committed
     std::atomic<bcos::protocol::BlockNumber> m_waitSealUntil = {0};
 
     bcos::crypto::NodeIDSetPtr m_connectedNodeList;
@@ -412,11 +454,14 @@ protected:
 
     std::function<void()> m_fastViewChangeHandler;
 
-    std::atomic_bool m_startRecovered = {false};
-
     std::function<bool(bcos::crypto::NodeIDPtr)> m_faultyDiscriminator;
 
     mutable RecursiveMutex m_mutex;
+
+    // handler to notify txs status and try to request txs from peers
+    std::function<void()> m_txsStatusSyncHandler;
+
+    bcos::protocol::BlockFactory::Ptr m_blockFactory;
+    RPBFTConfigTools::Ptr m_rpbftConfigTools = nullptr;
 };
-}  // namespace consensus
-}  // namespace bcos
+}  // namespace bcos::consensus

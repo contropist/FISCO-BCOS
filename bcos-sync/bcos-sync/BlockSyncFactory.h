@@ -21,10 +21,9 @@
 #pragma once
 #include "bcos-sync/BlockSync.h"
 #include "bcos-sync/BlockSyncConfig.h"
+#include "bcos-tool/NodeTimeMaintenance.h"
 
-namespace bcos
-{
-namespace sync
+namespace bcos::sync
 {
 class BlockSyncFactory
 {
@@ -36,12 +35,15 @@ public:
         bcos::ledger::LedgerInterface::Ptr _ledger, bcos::txpool::TxPoolInterface::Ptr _txpool,
         bcos::front::FrontServiceInterface::Ptr _frontService,
         bcos::scheduler::SchedulerInterface::Ptr _scheduler,
-        bcos::consensus::ConsensusInterface::Ptr _consensus);
-    virtual ~BlockSyncFactory() {}
+        bcos::consensus::ConsensusInterface::Ptr _consensus,
+        bcos::tool::NodeTimeMaintenance::Ptr _nodeTimeMaintenance,
+        bool enableSendBlockStatusByTree = false, std::uint32_t syncTreeWidth = 3,
+        bool _syncArchivedBlockBody = false);
+    virtual ~BlockSyncFactory() = default;
 
     virtual BlockSync::Ptr createBlockSync();
 
-protected:
+private:
     bcos::crypto::PublicPtr m_nodeId;
     bcos::protocol::BlockFactory::Ptr m_blockFactory;
     bcos::protocol::TransactionSubmitResultFactory::Ptr m_txResultFactory;
@@ -50,6 +52,9 @@ protected:
     bcos::front::FrontServiceInterface::Ptr m_frontService;
     bcos::scheduler::SchedulerInterface::Ptr m_scheduler;
     bcos::consensus::ConsensusInterface::Ptr m_consensus;
+    bcos::tool::NodeTimeMaintenance::Ptr m_nodeTimeMaintenance;
+    bool m_enableSendBlockStatusByTree;
+    std::int64_t m_syncTreeWidth;
+    bool m_syncArchivedBlockBody = false;
 };
-}  // namespace sync
-}  // namespace bcos
+}  // namespace bcos::sync

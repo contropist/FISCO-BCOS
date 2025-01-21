@@ -20,16 +20,14 @@
  * @date 2021-05-08
  */
 #pragma once
-#include "bcos-txpool/txpool/interfaces/NonceCheckerInterface.h"
-#include "bcos-txpool/txpool/interfaces/TxPoolStorageInterface.h"
-#include "bcos-txpool/txpool/interfaces/TxValidatorInterface.h"
-#include <bcos-framework/interfaces/ledger/LedgerInterface.h>
-#include <bcos-framework/interfaces/protocol/BlockFactory.h>
-#include <bcos-framework/interfaces/protocol/TransactionMetaData.h>
-#include <bcos-framework/interfaces/protocol/TransactionSubmitResultFactory.h>
-namespace bcos
-{
-namespace txpool
+#include "txpool/interfaces/NonceCheckerInterface.h"
+#include "txpool/interfaces/TxValidatorInterface.h"
+#include "txpool/utilities/Common.h"
+#include <bcos-framework/ledger/LedgerInterface.h>
+#include <bcos-framework/protocol/BlockFactory.h>
+#include <bcos-framework/protocol/TransactionMetaData.h>
+#include <bcos-framework/protocol/TransactionSubmitResultFactory.h>
+namespace bcos::txpool
 {
 class TxPoolConfig
 {
@@ -39,16 +37,19 @@ public:
         bcos::protocol::TransactionSubmitResultFactory::Ptr _txResultFactory,
         bcos::protocol::BlockFactory::Ptr _blockFactory,
         std::shared_ptr<bcos::ledger::LedgerInterface> _ledger,
-        NonceCheckerInterface::Ptr _txpoolNonceChecker, int64_t _blockLimit = 1000)
+        NonceCheckerInterface::Ptr _txpoolNonceChecker, int64_t _blockLimit, size_t _poolLimit,
+        bool checkTransactionSignature)
       : m_txValidator(std::move(_txValidator)),
         m_txResultFactory(std::move(_txResultFactory)),
         m_blockFactory(std::move(_blockFactory)),
         m_ledger(std::move(_ledger)),
         m_txPoolNonceChecker(std::move(_txpoolNonceChecker)),
-        m_blockLimit(_blockLimit)
+        m_blockLimit(_blockLimit),
+        m_poolLimit(_poolLimit),
+        m_checkTransactionSignature(checkTransactionSignature)
     {}
 
-    virtual ~TxPoolConfig() {}
+    virtual ~TxPoolConfig() = default;
     virtual void setPoolLimit(size_t _poolLimit) { m_poolLimit = _poolLimit; }
     virtual size_t poolLimit() const { return m_poolLimit; }
 
@@ -63,7 +64,7 @@ public:
     bcos::protocol::BlockFactory::Ptr blockFactory() { return m_blockFactory; }
     void setBlockFactory(bcos::protocol::BlockFactory::Ptr _blockFactory)
     {
-        m_blockFactory = _blockFactory;
+        m_blockFactory = std::move(_blockFactory);
     }
 
     bcos::protocol::TransactionFactory::Ptr txFactory()
@@ -73,14 +74,16 @@ public:
     std::shared_ptr<bcos::ledger::LedgerInterface> ledger() { return m_ledger; }
     int64_t blockLimit() const { return m_blockLimit; }
 
+    bool checkTransactionSignature() const { return m_checkTransactionSignature; }
+
 private:
     TxValidatorInterface::Ptr m_txValidator;
     bcos::protocol::TransactionSubmitResultFactory::Ptr m_txResultFactory;
     bcos::protocol::BlockFactory::Ptr m_blockFactory;
     std::shared_ptr<bcos::ledger::LedgerInterface> m_ledger;
     NonceCheckerInterface::Ptr m_txPoolNonceChecker;
-    size_t m_poolLimit = 15000;
-    int64_t m_blockLimit = 1000;
+    int64_t m_blockLimit = DEFAULT_BLOCK_LIMIT;
+    size_t m_poolLimit = DEFAULT_POOL_LIMIT;
+    bool m_checkTransactionSignature;
 };
-}  // namespace txpool
-}  // namespace bcos
+}  // namespace bcos::txpool

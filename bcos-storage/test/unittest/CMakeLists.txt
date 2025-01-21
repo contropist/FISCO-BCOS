@@ -15,11 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ------------------------------------------------------------------------------
-list(APPEND SOURCES "TestRocksDBStorage.cpp" "main.cpp")
+list(APPEND SOURCES "TestRocksDBStorage.cpp" "TestRocksDBStorage2.cpp" "main.cpp")
 # cmake settings
-set(TEST_BINARY_NAME test-bcos-storage)
+set(TEST_BINARY_NAME test-storage)
 
-if(USE_TiKV)
+if(WITH_TIKV)
     list(APPEND SOURCES "TestTiKVStorage.cpp")
 else()
     set(EXCLUDE_SUITES "TestTiKVStorage")
@@ -30,13 +30,18 @@ endif()
 add_executable(${TEST_BINARY_NAME} ${SOURCES})
 target_include_directories(${TEST_BINARY_NAME} PRIVATE . ../../src)
 
-find_package(Boost CONFIG QUIET REQUIRED unit_test_framework)
+find_package(Boost REQUIRED unit_test_framework log)
+find_package(fmt REQUIRED)
 
-target_link_libraries(${TEST_BINARY_NAME} Boost::unit_test_framework ${STORAGE_TARGET})
-add_test(NAME test-storage WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} COMMAND ${TEST_BINARY_NAME})
+target_link_libraries(${TEST_BINARY_NAME} PUBLIC ${STORAGE_TARGET} Boost::unit_test_framework Boost::log fmt::fmt-header-only)
+set_source_files_properties("main.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+set_target_properties(${TEST_BINARY_NAME} PROPERTIES UNITY_BUILD "ON")
+include(SearchTestCases)
+config_test_cases("" "${SOURCES}" ${TEST_BINARY_NAME} "${EXCLUDE_SUITES}")
+# add_test(NAME test-storage WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY} COMMAND ${TEST_BINARY_NAME})
 
 # for code coverage
-if (COVERAGE)
-    include(Coverage)
-    config_coverage("coverage" "'/usr*' 'boost/**'")
-endif ()
+#if (COVERAGE)
+#    include(Coverage)
+#    config_coverage("storage-coverage" "'/usr*' 'boost/**'")
+#endif ()

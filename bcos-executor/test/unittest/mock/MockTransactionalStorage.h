@@ -1,11 +1,13 @@
 #pragma once
 
 #include "../../src/Common.h"
-#include <bcos-framework/interfaces/storage/StorageInterface.h>
+#include <bcos-framework/storage/StorageInterface.h>
 #include <bcos-table/src/StateStorage.h>
 #include <boost/algorithm/hex.hpp>
 #include <boost/test/unit_test.hpp>
 #include <memory>
+
+using namespace bcos::protocol;
 
 namespace bcos::test
 {
@@ -14,7 +16,7 @@ class MockTransactionalStorage : public bcos::storage::TransactionalStorageInter
 public:
     MockTransactionalStorage(bcos::crypto::Hash::Ptr hashImpl) : m_hashImpl(std::move(hashImpl))
     {
-        m_inner = std::make_shared<bcos::storage::StateStorage>(nullptr);
+        m_inner = std::make_shared<bcos::storage::StateStorage>(nullptr, false);
         m_inner->setEnableTraverse(true);
     }
 
@@ -33,18 +35,27 @@ public:
     }
 
     void asyncGetRows(std::string_view table,
-        const std::variant<const gsl::span<std::string_view const>,
-            const gsl::span<std::string const>>& _keys,
+        RANGES::any_view<std::string_view,
+            RANGES::category::input | RANGES::category::random_access | RANGES::category::sized>
+            keys,
         std::function<void(Error::UniquePtr, std::vector<std::optional<storage::Entry>>)>
             _callback) noexcept override
     {
-        m_inner->asyncGetRows(table, _keys, std::move(_callback));
+        m_inner->asyncGetRows(table, keys, std::move(_callback));
     }
 
     void asyncSetRow(std::string_view table, std::string_view key, storage::Entry entry,
         std::function<void(Error::UniquePtr)> callback) noexcept override
     {
         m_inner->asyncSetRow(table, key, std::move(entry), std::move(callback));
+    }
+
+    void setRow(std::string_view table, std::string_view key, storage::Entry entry) noexcept
+    {
+        std::promise<Error::UniquePtr> promise;
+        m_inner->asyncSetRow(table, key, std::move(entry),
+            [&](auto&& error) { promise.set_value(std::move(error)); });
+        promise.get_future().get();
     }
 
     void asyncOpenTable(std::string_view tableName,
@@ -56,7 +67,7 @@ public:
 
     void asyncPrepare(const TwoPCParams& params,
         const bcos::storage::TraverseStorageInterface& storage,
-        std::function<void(Error::Ptr, uint64_t)> callback) noexcept override
+        std::function<void(Error::Ptr, uint64_t, const std::string&)> callback) noexcept override
     {
         BOOST_CHECK_GT(params.number, 0);
 
@@ -73,7 +84,7 @@ public:
                 auto myTable = m_inner->openTable(table);
                 if (!myTable)
                 {
-                    m_inner->createTable(std::string(table), executor::STORAGE_VALUE);
+                    m_inner->createTable(std::string(table), std::string(executor::STORAGE_VALUE));
                     myTable = m_inner->openTable(std::string(table));
                 }
                 myTable->setRow(key, entry);
@@ -81,14 +92,14 @@ public:
                 return true;
             });
 
-        callback(nullptr, 0);
+        callback(nullptr, 0, "");
     }
 
-    void asyncCommit(
-        const TwoPCParams& params, std::function<void(Error::Ptr)> callback) noexcept override
+    void asyncCommit(const TwoPCParams& params,
+        std::function<void(Error::Ptr, uint64_t)> callback) noexcept override
     {
         BOOST_CHECK_GT(params.number, 0);
-        callback(nullptr);
+        callback(nullptr, 0);
     }
 
     void asyncRollback(

@@ -18,15 +18,19 @@
  * @date 2021-05-13
  */
 #pragma once
-#include <bcos-framework/interfaces/front/FrontServiceInterface.h>
-#include <bcos-framework/interfaces/multigroup/ChainNodeInfo.h>
-#include <bcos-framework/interfaces/protocol/ProtocolTypeDef.h>
+#include "bcos-tars-protocol/Common.h"
+#include "bcos-utilities/ObjectCounter.h"
+#include <bcos-framework/front/FrontServiceInterface.h>
+#include <bcos-framework/multigroup/ChainNodeInfo.h>
+#include <bcos-framework/protocol/ProtocolInfo.h>
+#include <bcos-framework/protocol/ProtocolTypeDef.h>
 #include <bcos-tars-protocol/client/FrontServiceClient.h>
+#include <bcos-tars-protocol/impl/TarsServantProxyCallback.h>
 namespace bcos
 {
 namespace gateway
 {
-class FrontServiceInfo
+class FrontServiceInfo : public ObjectCounter<FrontServiceInfo>
 {
 public:
     using Ptr = std::shared_ptr<FrontServiceInfo>;
@@ -46,21 +50,29 @@ public:
         {
             return false;
         }
-        vector<EndpointInfo> activeEndPoints;
-        vector<EndpointInfo> nactiveEndPoints;
-        m_frontServicePrx->tars_endpointsAll(activeEndPoints, nactiveEndPoints);
-        return (activeEndPoints.size() == 0);
+
+        return !bcostars::checkConnection(
+            "FrontService", "unreachable", m_frontServicePrx, nullptr, false);
     }
 
     std::string const& nodeID() const { return m_nodeID; }
 
     bcos::protocol::NodeType nodeType() const { return m_nodeType; }
 
+    // the protocolInfo of the nodeService
+    void setProtocolInfo(bcos::protocol::ProtocolInfo::ConstPtr _protocolInfo)
+    {
+        m_protocolInfo = _protocolInfo;
+    }
+    bcos::protocol::ProtocolInfo::ConstPtr protocolInfo() const { return m_protocolInfo; }
+
 private:
     std::string m_nodeID;
     bcos::protocol::NodeType m_nodeType;
     bcos::front::FrontServiceInterface::Ptr m_frontService;
     bcostars::FrontServicePrx m_frontServicePrx;
+
+    bcos::protocol::ProtocolInfo::ConstPtr m_protocolInfo;
 };
 }  // namespace gateway
 }  // namespace bcos

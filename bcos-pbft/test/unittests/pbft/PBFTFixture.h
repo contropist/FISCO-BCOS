@@ -19,24 +19,21 @@
  * @date 2021-05-28
  */
 #pragma once
-#include "bcos-framework/interfaces/storage/KVStorageHelper.h"
+#include "bcos-crypto/interfaces/crypto/KeyPairInterface.h"
+#include "bcos-framework/storage/KVStorageHelper.h"
 #include "bcos-pbft/core/StateMachine.h"
 #include "bcos-pbft/pbft/PBFTFactory.h"
 #include "bcos-pbft/pbft/PBFTImpl.h"
 #include "bcos-pbft/pbft/storage/LedgerStorage.h"
-#include "interfaces/crypto/KeyPairInterface.h"
-#include <bcos-framework/interfaces/consensus/ConsensusNode.h>
+#include <bcos-framework/consensus/ConsensusNode.h>
 #include <bcos-framework/testutils/faker/FakeFrontService.h>
 #include <bcos-framework/testutils/faker/FakeLedger.h>
 #include <bcos-framework/testutils/faker/FakeScheduler.h>
 #include <bcos-framework/testutils/faker/FakeSealer.h>
 #include <bcos-framework/testutils/faker/FakeTxPool.h>
 #include <bcos-protocol/TransactionSubmitResultFactoryImpl.h>
-#include <bcos-protocol/protobuf/PBBlockFactory.h>
-#include <bcos-protocol/protobuf/PBBlockHeaderFactory.h>
-#include <bcos-protocol/protobuf/PBTransactionFactory.h>
-#include <bcos-protocol/protobuf/PBTransactionReceiptFactory.h>
 #include <bcos-table/src/StateStorage.h>
+#include <bcos-tars-protocol/protocol/BlockFactoryImpl.h>
 #include <boost/bind/bind.hpp>
 #include <boost/test/unit_test.hpp>
 #include <chrono>
@@ -65,12 +62,15 @@ public:
         std::shared_ptr<PBFTMessageFactory> _pbftMessageFactory,
         std::shared_ptr<PBFTCodecInterface> _codec, std::shared_ptr<ValidatorInterface> _validator,
         std::shared_ptr<bcos::front::FrontServiceInterface> _frontService,
-        StateMachineInterface::Ptr _stateMachine, PBFTStorage::Ptr _storage)
+        StateMachineInterface::Ptr _stateMachine, PBFTStorage::Ptr _storage,
+        protocol::BlockFactory::Ptr _blockFactory)
       : PBFTConfig(_cryptoSuite, _keyPair, _pbftMessageFactory, _codec, _validator, _frontService,
-            _stateMachine, _storage)
+            _stateMachine, _storage, _blockFactory)
     {}
 
     ~FakePBFTConfig() override {}
+
+    void stop() override { PBFTConfig::stop(); }
 
     virtual void setMinRequiredQuorum(uint64_t _quorum) { m_minRequiredQuorum = _quorum; }
 };
@@ -132,9 +132,11 @@ public:
         m_cacheProcessor->registerProposalAppliedHandler(
             boost::bind(&FakePBFTEngine::onProposalApplied, this, boost::placeholders::_1,
                 boost::placeholders::_2, boost::placeholders::_3));
-        m_cacheProcessor->registerOnLoadAndVerifyProposalSucc(boost::bind(
-            &FakePBFTEngine::onLoadAndVerifyProposalSucc, this, boost::placeholders::_1));
+        m_cacheProcessor->registerOnLoadAndVerifyProposalFinish(
+            boost::bind(&FakePBFTEngine::onLoadAndVerifyProposalFinish, this,
+                boost::placeholders::_1, boost::placeholders::_2, boost::placeholders::_3));
         initSendResponseHandler();
+        _config->enableAsMasterNode(true);
     }
     ~FakePBFTEngine() override {}
 
@@ -144,10 +146,12 @@ public:
         PBFTEngine::onReceivePBFTMessage(_error, _nodeID, _data, _sendResponse);
     }
 
+    auto& msgQueue() { return m_msgQueue; }
+
     // PBFT main processing function
     void executeWorker() override
     {
-        while (!msgQueue()->empty())
+        while (!msgQueue().empty())
         {
             PBFTEngine::executeWorker();
         }
@@ -155,7 +159,7 @@ public:
 
     void executeWorkerByRoundbin() { return PBFTEngine::executeWorker(); }
 
-    void onRecvProposal(bool _containSysTxs, bytesConstRef _proposalData,
+    void onRecvProposal(bool _containSysTxs, const protocol::Block& _proposalData,
         bcos::protocol::BlockNumber _proposalIndex,
         bcos::crypto::HashType const& _proposalHash) override
     {
@@ -169,14 +173,22 @@ public:
         return PBFTEngine::handlePrePrepareMsg(
             _prePrepareMsg, _needVerifyProposal, _generatedFromNewView, _needCheckSignature);
     }
-
-    PBFTMsgQueuePtr msgQueue() { return m_msgQueue; }
 };
 
 class FakePBFTImpl : public PBFTImpl
 {
 public:
-    explicit FakePBFTImpl(PBFTEngine::Ptr _pbftEngine) : PBFTImpl(_pbftEngine) { m_running = true; }
+    explicit FakePBFTImpl(PBFTEngine::Ptr _pbftEngine) : PBFTImpl(_pbftEngine)
+    {
+        m_running = true;
+        m_masterNode.store(true);
+    }
+    void start() override { m_pbftEngine->recoverState(); }
+    void init() override
+    {
+        PBFTImpl::init();
+        start();
+    }
     ~FakePBFTImpl() {}
 };
 
@@ -208,14 +220,13 @@ public:
 
         auto pbftConfig = std::make_shared<FakePBFTConfig>(m_cryptoSuite, m_keyPair,
             orgPBFTConfig->pbftMessageFactory(), orgPBFTConfig->codec(), orgPBFTConfig->validator(),
-            orgPBFTConfig->frontService(), stateMachine, pbftStorage);
+            orgPBFTConfig->frontService(), stateMachine, pbftStorage, m_blockFactory);
         PBFT_LOG(DEBUG) << LOG_DESC("create PBFTEngine");
         auto pbftEngine = std::make_shared<FakePBFTEngine>(pbftConfig);
 
         PBFT_LOG(INFO) << LOG_DESC("create PBFT");
         auto fakedPBFT = std::make_shared<FakePBFTImpl>(pbftEngine);
-        auto ledgerFetcher = std::make_shared<bcos::tool::LedgerConfigFetcher>(m_ledger);
-        fakedPBFT->setLedgerFetcher(ledgerFetcher);
+        fakedPBFT->setLedger(m_ledger);
         pbftConfig->setTimeoutState(false);
         pbftConfig->timer()->stop();
         return fakedPBFT;
@@ -237,7 +248,8 @@ public:
         m_frontService = std::make_shared<FakeFrontService>(_keyPair->publicKey());
 
         // create KVStorageHelper
-        m_storage = std::make_shared<KVStorageHelper>(std::make_shared<StateStorage>(nullptr));
+        m_storage =
+            std::make_shared<KVStorageHelper>(std::make_shared<StateStorage>(nullptr, false));
 
         // create fakeLedger
         if (_ledger == nullptr)
@@ -245,6 +257,9 @@ public:
             m_ledger = std::make_shared<FakeLedger>(m_blockFactory, 20, 10, 10);
             m_ledger->setSystemConfig(SYSTEM_KEY_TX_COUNT_LIMIT, std::to_string(_txCountLimit));
             m_ledger->setSystemConfig(SYSTEM_KEY_CONSENSUS_LEADER_PERIOD, std::to_string(1));
+            m_ledger->setSystemConfig(SYSTEM_KEY_AUTH_CHECK_STATUS, std::to_string(0));
+            m_ledger->setSystemConfig(
+                SYSTEM_KEY_COMPATIBILITY_VERSION, protocol::DEFAULT_VERSION_STR);
             // m_ledger->ledgerConfig()->setConsensusTimeout(_consensusTimeout * 20);
             m_ledger->ledgerConfig()->setBlockTxCountLimit(_txCountLimit);
         }
@@ -266,18 +281,46 @@ public:
         m_pbft->registerFaultyDiscriminator([](bcos::crypto::NodeIDPtr) { return false; });
     }
 
-    virtual ~PBFTFixture() {}
+    virtual ~PBFTFixture() { stop(); }
 
     void init() { m_pbft->init(); }
 
-    void appendConsensusNode(ConsensusNode::Ptr _node)
+    void stop()
+    {
+        if (m_txpool)
+        {
+            m_txpool->stop();
+        }
+        if (m_scheduler)
+        {
+            m_scheduler->stop();
+        }
+        if (m_frontService)
+        {
+            m_frontService->stop();
+        }
+        if (m_pbftEngine)
+        {
+            m_pbftEngine->stop();
+        }
+        if (m_pbft)
+        {
+            m_pbft->stop();
+        }
+        if (m_ledger)
+        {
+            m_ledger->stop();
+        }
+    }
+
+    void appendConsensusNode(ConsensusNode _node)
     {
         m_ledger->ledgerConfig()->mutableConsensusNodeList().push_back(_node);
         pbftConfig()->setConsensusNodeList(m_ledger->ledgerConfig()->mutableConsensusNodeList());
         bcos::crypto::NodeIDSet connectedNodeList;
         for (auto const& node : m_ledger->ledgerConfig()->mutableConsensusNodeList())
         {
-            connectedNodeList.insert(node->nodeID());
+            connectedNodeList.insert(node.nodeID);
         }
         pbftConfig()->setConnectedNodeList(connectedNodeList);
         m_frontService->setNodeIDList(connectedNodeList);
@@ -285,7 +328,7 @@ public:
 
     void appendConsensusNode(PublicPtr _nodeId)
     {
-        auto node = std::make_shared<ConsensusNode>(_nodeId, 1);
+        auto node = ConsensusNode{_nodeId, consensus::Type::consensus_sealer, 1, 0, 0};
         appendConsensusNode(node);
     }
 
@@ -351,6 +394,9 @@ inline std::map<IndexType, PBFTFixture::Ptr> createFakers(CryptoSuite::Ptr _cryp
             blockFactory, _currentBlockNumber + 1, 10, 0, ledger->sealerList());
         fakedLedger->setSystemConfig(SYSTEM_KEY_TX_COUNT_LIMIT, std::to_string(_txCountLimit));
         fakedLedger->setSystemConfig(SYSTEM_KEY_CONSENSUS_LEADER_PERIOD, std::to_string(1));
+        fakedLedger->setSystemConfig(SYSTEM_KEY_AUTH_CHECK_STATUS, std::to_string(0));
+        fakedLedger->setSystemConfig(
+            SYSTEM_KEY_COMPATIBILITY_VERSION, protocol::DEFAULT_VERSION_STR);
         // fakedLedger->ledgerConfig()->setConsensusTimeout(_consensusTimeout * 1000);
         fakedLedger->ledgerConfig()->setBlockTxCountLimit(_txCountLimit);
         auto peerFaker = createPBFTFixture(_cryptoSuite, fakedLedger, _txCountLimit);

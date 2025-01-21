@@ -12,34 +12,31 @@
  */
 
 #pragma once
+#include "bcos-task/Task.h"
+#include "bcos-utilities/Error.h"
 #include <bcos-gateway/libnetwork/Common.h>
 #include <bcos-gateway/libnetwork/Message.h>
-#include <memory>
-
+#include <bcos-gateway/libnetwork/SessionCallback.h>
 #include <boost/asio.hpp>
+#include <optional>
+#include <range/v3/view/any_view.hpp>
 
-namespace bcos
-{
-namespace gateway
+
+namespace bcos::gateway
 {
 class SocketFace;
-
-using SessionCallbackFunc = std::function<void(NetworkException, Message::Ptr)>;
-struct ResponseCallback : public std::enable_shared_from_this<ResponseCallback>
-{
-    using Ptr = std::shared_ptr<ResponseCallback>;
-
-    uint64_t m_startTime;
-    SessionCallbackFunc callback;
-    std::shared_ptr<boost::asio::deadline_timer> timeoutHandler;
-};
 
 class SessionFace
 {
 public:
-    virtual ~SessionFace(){};
-
     using Ptr = std::shared_ptr<SessionFace>;
+
+    SessionFace() = default;
+    SessionFace(const SessionFace&) = delete;
+    SessionFace(SessionFace&&) = delete;
+    SessionFace& operator=(SessionFace&&) = delete;
+    SessionFace& operator=(const SessionFace&) = delete;
+    virtual ~SessionFace() noexcept = default;
 
     virtual void start() = 0;
     virtual void disconnect(DisconnectReason) = 0;
@@ -47,15 +44,21 @@ public:
     virtual void asyncSendMessage(
         Message::Ptr, Options = Options(), SessionCallbackFunc = SessionCallbackFunc()) = 0;
 
+    virtual task::Task<Message::Ptr> sendMessage(
+        const Message& header, ::ranges::any_view<bytesConstRef> payloads, Options options) = 0;
+
     virtual std::shared_ptr<SocketFace> socket() = 0;
 
     virtual void setMessageHandler(
-        std::function<void(NetworkException, std::shared_ptr<SessionFace>, Message::Ptr)>
-            messageHandler) = 0;
+        std::function<void(NetworkException, SessionFace::Ptr, Message::Ptr)> messageHandler) = 0;
+
+    virtual void setBeforeMessageHandler(
+        std::function<std::optional<bcos::Error>(SessionFace&, Message&)> handler) = 0;
 
     virtual NodeIPEndpoint nodeIPEndpoint() const = 0;
 
-    virtual bool actived() const = 0;
+    virtual bool active() const = 0;
+
+    virtual std::size_t writeQueueSize() = 0;
 };
-}  // namespace gateway
-}  // namespace bcos
+}  // namespace bcos::gateway

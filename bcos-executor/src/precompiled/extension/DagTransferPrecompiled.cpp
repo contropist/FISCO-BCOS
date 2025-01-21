@@ -19,12 +19,11 @@
  */
 
 #include "DagTransferPrecompiled.h"
-#include "../PrecompiledCodec.h"
-#include "../PrecompiledResult.h"
-#include "../TableFactoryPrecompiled.h"
-#include "../Utilities.h"
-#include <bcos-framework/interfaces/ledger/LedgerTypeDef.h>
-#include <bcos-framework/interfaces/storage/Common.h>
+#include "bcos-codec/wrapper/CodecWrapper.h"
+#include "bcos-executor/src/precompiled/common/PrecompiledResult.h"
+#include "bcos-executor/src/precompiled/common/Utilities.h"
+#include <bcos-framework/ledger/LedgerTypeDef.h>
+#include <bcos-framework/storage/Common.h>
 
 using namespace bcos;
 using namespace bcos::executor;
@@ -73,13 +72,14 @@ std::vector<std::string> DagTransferPrecompiled::getParallelTag(bytesConstRef _p
     bytesConstRef data = getParamData(_param);
 
     std::vector<std::string> results;
-    auto codec = std::make_shared<PrecompiledCodec>(m_hashImpl, _isWasm);
+    results.reserve(2);
+    auto codec = CodecWrapper(m_hashImpl, _isWasm);
     // user_name user_balance 2 fields in table, the key of table is user_name field
     if (func == name2Selector[DAG_TRANSFER_METHOD_ADD_STR_UINT])
     {  // userAdd(string,uint256)
         std::string user;
         u256 amount;
-        codec->decode(data, user, amount);
+        codec.decode(data, user, amount);
         // if params is invalid , parallel process can be done
         if (!user.empty())
         {
@@ -90,7 +90,7 @@ std::vector<std::string> DagTransferPrecompiled::getParallelTag(bytesConstRef _p
     {  // userSave(string,uint256)
         std::string user;
         u256 amount;
-        codec->decode(data, user, amount);
+        codec.decode(data, user, amount);
         // if params is invalid , parallel process can be done
         if (!user.empty())
         {
@@ -101,24 +101,24 @@ std::vector<std::string> DagTransferPrecompiled::getParallelTag(bytesConstRef _p
     {  // userDraw(string,uint256)
         std::string user;
         u256 amount;
-        codec->decode(data, user, amount);
+        codec.decode(data, user, amount);
         // if params is invalid , parallel process can be done
         if (!user.empty())
         {
             results.push_back(user);
         }
     }
-    else if (func == name2Selector[DAG_TRANSFER_METHOD_TRS_STR2_UINT])
+    else if (func == name2Selector[DAG_TRANSFER_METHOD_TRS_STR2_UINT]) [[likely]]
     {
         // userTransfer(string,string,uint256)
         std::string fromUser, toUser;
         u256 amount;
-        codec->decode(data, fromUser, toUser, amount);
+        codec.decode(data, fromUser, toUser, amount);
         // if params is invalid , parallel process can be done
         if (!fromUser.empty() && !toUser.empty())
         {
-            results.push_back(fromUser);
-            results.push_back(toUser);
+            results.emplace_back(std::move(fromUser));
+            results.emplace_back(std::move(toUser));
         }
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_BAL_STR])
@@ -130,50 +130,48 @@ std::vector<std::string> DagTransferPrecompiled::getParallelTag(bytesConstRef _p
     return results;
 }
 
-std::string DagTransferPrecompiled::toString()
-{
-    return "DagTransfer";
-}
-
 std::shared_ptr<PrecompiledExecResult> DagTransferPrecompiled::call(
-    std::shared_ptr<executor::TransactionExecutive> _executive, bytesConstRef _param,
-    const std::string& _origin, const std::string&, int64_t)
+    std::shared_ptr<executor::TransactionExecutive> _executive,
+    PrecompiledExecResult::Ptr _callParameters)
 {
     // parse function name
-    uint32_t func = getParamFunc(_param);
-    bytesConstRef data = getParamData(_param);
-    auto callResult = std::make_shared<PrecompiledExecResult>();
+    uint32_t func = getParamFunc(_callParameters->input());
+    bytesConstRef data = _callParameters->params();
     auto gasPricer = m_precompiledGasFactory->createPrecompiledGas();
 
     // user_name user_balance 2 fields in table, the key of table is user_name field
     if (func == name2Selector[DAG_TRANSFER_METHOD_ADD_STR_UINT])
     {  // userAdd(string,uint256)
-        userAddCall(_executive, data, _origin, callResult->mutableExecResult());
+        userAddCall(
+            _executive, data, _callParameters->m_origin, _callParameters->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_SAV_STR_UINT])
     {  // userSave(string,uint256)
-        userSaveCall(_executive, data, _origin, callResult->mutableExecResult());
+        userSaveCall(
+            _executive, data, _callParameters->m_origin, _callParameters->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_DRAW_STR_UINT])
     {  // userDraw(string,uint256)
-        userDrawCall(_executive, data, _origin, callResult->mutableExecResult());
+        userDrawCall(
+            _executive, data, _callParameters->m_origin, _callParameters->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_TRS_STR2_UINT])
     {  // userTransfer(string,string,uint256)
-        userTransferCall(_executive, data, _origin, callResult->mutableExecResult());
+        userTransferCall(
+            _executive, data, _callParameters->m_origin, _callParameters->mutableExecResult());
     }
     else if (func == name2Selector[DAG_TRANSFER_METHOD_BAL_STR])
     {  // userBalance(string user)
-        userBalanceCall(_executive, data, callResult->mutableExecResult());
+        userBalanceCall(_executive, data, _callParameters->mutableExecResult());
     }
     else
     {
-        PRECOMPILED_LOG(ERROR) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC("error func")
-                               << LOG_KV("func", func);
+        PRECOMPILED_LOG(INFO) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC("invalid func")
+                              << LOG_KV("func", func);
     }
-    gasPricer->updateMemUsed(callResult->m_execResult.size());
-    callResult->setGas(gasPricer->calTotalGas());
-    return callResult;
+    gasPricer->updateMemUsed(_callParameters->m_execResult.size());
+    _callParameters->setGasLeft(_callParameters->m_gasLeft - gasPricer->calTotalGas());
+    return _callParameters;
 }
 
 void DagTransferPrecompiled::userAddCall(std::shared_ptr<executor::TransactionExecutive> _executive,
@@ -182,10 +180,9 @@ void DagTransferPrecompiled::userAddCall(std::shared_ptr<executor::TransactionEx
     // userAdd(string,uint256)
     std::string user;
     u256 amount;
-    auto blockContext = _executive->blockContext().lock();
-    auto codec =
-        std::make_shared<PrecompiledCodec>(blockContext->hashHandler(), blockContext->isWasm());
-    codec->decode(_data, user, amount);
+    const auto& blockContext = _executive->blockContext();
+    auto codec = CodecWrapper(blockContext.hashHandler(), blockContext.isWasm());
+    codec.decode(_data, user, amount);
 
     int ret;
     std::string strErrorMsg;
@@ -220,10 +217,10 @@ void DagTransferPrecompiled::userAddCall(std::shared_ptr<executor::TransactionEx
     } while (false);
     if (!strErrorMsg.empty())
     {
-        PRECOMPILED_LOG(ERROR) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
-                               << LOG_KV("errorCode", ret);
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
+                               << LOG_KV("code", ret);
     }
-    _out = codec->encode(u256(ret));
+    _out = codec.encode(u256(ret));
 }
 
 void DagTransferPrecompiled::userSaveCall(
@@ -233,10 +230,9 @@ void DagTransferPrecompiled::userSaveCall(
     // userSave(string,uint256)
     std::string user;
     u256 amount;
-    auto blockContext = _executive->blockContext().lock();
-    auto codec =
-        std::make_shared<PrecompiledCodec>(blockContext->hashHandler(), blockContext->isWasm());
-    codec->decode(_data, user, amount);
+    const auto& blockContext = _executive->blockContext();
+    auto codec = CodecWrapper(blockContext.hashHandler(), blockContext.isWasm());
+    codec.decode(_data, user, amount);
 
     int ret;
     u256 balance;
@@ -297,10 +293,10 @@ void DagTransferPrecompiled::userSaveCall(
     } while (false);
     if (!strErrorMsg.empty())
     {
-        PRECOMPILED_LOG(ERROR) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
-                               << LOG_KV("errorCode", ret);
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
+                               << LOG_KV("code", ret);
     }
-    _out = codec->encode(u256(ret));
+    _out = codec.encode(u256(ret));
 }
 
 void DagTransferPrecompiled::userDrawCall(
@@ -309,10 +305,9 @@ void DagTransferPrecompiled::userDrawCall(
 {
     std::string user;
     u256 amount;
-    auto blockContext = _executive->blockContext().lock();
-    auto codec =
-        std::make_shared<PrecompiledCodec>(blockContext->hashHandler(), blockContext->isWasm());
-    codec->decode(_data, user, amount);
+    const auto& blockContext = _executive->blockContext();
+    auto codec = CodecWrapper(blockContext.hashHandler(), blockContext.isWasm());
+    codec.decode(_data, user, amount);
 
     u256 balance;
     int ret;
@@ -364,20 +359,19 @@ void DagTransferPrecompiled::userDrawCall(
     } while (false);
     if (!strErrorMsg.empty())
     {
-        PRECOMPILED_LOG(ERROR) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
-                               << LOG_KV("errorCode", ret);
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
+                               << LOG_KV("code", ret);
     }
-    _out = codec->encode(u256(ret));
+    _out = codec.encode(u256(ret));
 }
 
 void DagTransferPrecompiled::userBalanceCall(
     std::shared_ptr<executor::TransactionExecutive> _executive, bytesConstRef _data, bytes& _out)
 {
     std::string user;
-    auto blockContext = _executive->blockContext().lock();
-    auto codec =
-        std::make_shared<PrecompiledCodec>(blockContext->hashHandler(), blockContext->isWasm());
-    codec->decode(_data, user);
+    const auto& blockContext = _executive->blockContext();
+    auto codec = CodecWrapper(blockContext.hashHandler(), blockContext.isWasm());
+    codec.decode(_data, user);
 
     u256 balance;
     int ret;
@@ -414,22 +408,21 @@ void DagTransferPrecompiled::userBalanceCall(
     } while (false);
     if (!strErrorMsg.empty())
     {
-        PRECOMPILED_LOG(ERROR) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
-                               << LOG_KV("errorCode", ret);
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
+                               << LOG_KV("code", ret);
     }
-    _out = codec->encode(u256(ret), balance);
+    _out = codec.encode(u256(ret), balance);
 }
 
 void DagTransferPrecompiled::userTransferCall(
     std::shared_ptr<executor::TransactionExecutive> _executive, bytesConstRef _data,
     std::string const&, bytes& _out)
 {
-    auto blockContext = _executive->blockContext().lock();
-    auto codec =
-        std::make_shared<PrecompiledCodec>(blockContext->hashHandler(), blockContext->isWasm());
+    const auto& blockContext = _executive->blockContext();
+    auto codec = CodecWrapper(blockContext.hashHandler(), blockContext.isWasm());
     std::string fromUser, toUser;
     u256 amount;
-    codec->decode(_data, fromUser, toUser, amount);
+    codec.decode(_data, fromUser, toUser, amount);
 
     u256 fromUserBalance, newFromUserBalance;
     u256 toUserBalance, newToUserBalance;
@@ -520,8 +513,8 @@ void DagTransferPrecompiled::userTransferCall(
     } while (false);
     if (!strErrorMsg.empty())
     {
-        PRECOMPILED_LOG(ERROR) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
-                               << LOG_KV("errorCode", ret);
+        PRECOMPILED_LOG(DEBUG) << LOG_BADGE("DagTransferPrecompiled") << LOG_DESC(strErrorMsg)
+                               << LOG_KV("code", ret);
     }
-    _out = codec->encode(u256(ret));
+    _out = codec.encode(u256(ret));
 }

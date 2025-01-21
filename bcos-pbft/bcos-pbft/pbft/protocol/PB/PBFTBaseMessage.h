@@ -21,6 +21,7 @@
 #pragma once
 #include "bcos-pbft/pbft/interfaces/PBFTBaseMessageInterface.h"
 #include "bcos-pbft/pbft/protocol/proto/PBFT.pb.h"
+#include "bcos-utilities/Common.h"
 #include <bcos-protocol/Common.h>
 namespace bcos
 {
@@ -31,11 +32,15 @@ class PBFTBaseMessage : virtual public PBFTBaseMessageInterface
 public:
     using Ptr = std::shared_ptr<PBFTBaseMessage>;
     PBFTBaseMessage()
-      : m_baseMessage(std::make_shared<BaseMessage>()), m_signatureData(std::make_shared<bytes>())
+      : m_baseMessage(std::make_shared<BaseMessage>()),
+        m_signatureData(std::make_shared<bytes>()),
+        m_createTime(bcos::utcTime())
     {}
 
     explicit PBFTBaseMessage(std::shared_ptr<BaseMessage> _baseMessage)
-      : m_baseMessage(_baseMessage), m_signatureData(std::make_shared<bytes>())
+      : m_baseMessage(std::move(_baseMessage)),
+        m_signatureData(std::make_shared<bytes>()),
+        m_createTime(bcos::utcTime())
     {
         PBFTBaseMessage::deserializeToObject();
     }
@@ -59,7 +64,7 @@ public:
     void setHash(bcos::crypto::HashType const& _hash) override
     {
         m_hash = _hash;
-        m_baseMessage->set_hash(m_hash.data(), bcos::crypto::HashType::size);
+        m_baseMessage->set_hash(m_hash.data(), bcos::crypto::HashType::SIZE);
     }
 
     PacketType packetType() const override { return m_packetType; }
@@ -98,7 +103,7 @@ public:
     void setSignatureDataHash(bcos::crypto::HashType const& _hash) override
     {
         m_dataHash = _hash;
-        m_baseMessage->set_signaturehash(_hash.data(), bcos::crypto::HashType::size);
+        m_baseMessage->set_signaturehash(_hash.data(), bcos::crypto::HashType::SIZE);
     }
     bool verifySignature(
         bcos::crypto::CryptoSuite::Ptr _cryptoSuite, bcos::crypto::PublicPtr _pubKey) override
@@ -109,7 +114,7 @@ public:
     int64_t index() const override { return m_baseMessage->index(); }
     void setIndex(int64_t _index) override { m_baseMessage->set_index(_index); }
 
-    bool operator==(PBFTBaseMessage const& _pbftMessage)
+    bool operator==(PBFTBaseMessage const& _pbftMessage) const
     {
         return (timestamp() == _pbftMessage.timestamp()) && (version() == _pbftMessage.version()) &&
                (generatedFrom() == _pbftMessage.generatedFrom()) &&
@@ -118,22 +123,30 @@ public:
 
     void setFrom(bcos::crypto::PublicPtr _from) override { m_from = _from; }
     bcos::crypto::PublicPtr from() const override { return m_from; }
+    uint64_t liveTimeInMilliseconds() const override { return bcos::utcTime() - m_createTime; }
+    std::string toDebugString() const override
+    {
+        std::stringstream stringstream;
+        stringstream << LOG_KV("type", m_packetType)
+                     << LOG_KV("fromNode", m_from ? m_from->shortHex() : "null");
+        return stringstream.str();
+    }
 
 protected:
     virtual void deserializeToObject()
     {
         auto const& hashData = m_baseMessage->hash();
-        if (hashData.size() >= bcos::crypto::HashType::size)
+        if (hashData.size() >= bcos::crypto::HashType::SIZE)
         {
             m_hash =
-                bcos::crypto::HashType((byte const*)hashData.c_str(), bcos::crypto::HashType::size);
+                bcos::crypto::HashType((byte const*)hashData.c_str(), bcos::crypto::HashType::SIZE);
         }
 
         auto const& signatureDataHash = m_baseMessage->signaturehash();
-        if (signatureDataHash.size() >= bcos::crypto::HashType::size)
+        if (signatureDataHash.size() >= bcos::crypto::HashType::SIZE)
         {
             m_dataHash = bcos::crypto::HashType(
-                (byte const*)signatureDataHash.c_str(), bcos::crypto::HashType::size);
+                (byte const*)signatureDataHash.c_str(), bcos::crypto::HashType::SIZE);
         }
     }
 
@@ -148,6 +161,7 @@ protected:
     bytesPointer m_signatureData;
 
     bcos::crypto::PublicPtr m_from;
+    uint64_t m_createTime = 0;
 };
 }  // namespace consensus
 }  // namespace bcos

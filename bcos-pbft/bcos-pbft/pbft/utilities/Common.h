@@ -18,17 +18,15 @@
  * @date 2021-04-12
  */
 #pragma once
+#include <bcos-framework/Common.h>
 #include <bcos-utilities/Exceptions.h>
-#include <bcos-utilities/Log.h>
 #include <stdint.h>
 
 #define PBFT_LOG(LEVEL) BCOS_LOG(LEVEL) << LOG_BADGE("CONSENSUS") << LOG_BADGE("PBFT")
 #define PBFT_STORAGE_LOG(LEVEL) \
     BCOS_LOG(LEVEL) << LOG_BADGE("CONSENSUS") << LOG_BADGE("PBFT") << LOG_BADGE("STORAGE")
 
-namespace bcos
-{
-namespace consensus
+namespace bcos::consensus
 {
 enum PacketType : uint32_t
 {
@@ -47,5 +45,4 @@ enum PacketType : uint32_t
 };
 DERIVE_BCOS_EXCEPTION(UnknownPBFTMsgType);
 DERIVE_BCOS_EXCEPTION(InitPBFTException);
-}  // namespace consensus
-}  // namespace bcos
+}  // namespace bcos::consensus

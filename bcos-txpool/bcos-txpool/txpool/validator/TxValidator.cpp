@@ -19,62 +19,110 @@
  * @date 2021-05-11
  */
 #include "TxValidator.h"
+#include "bcos-task/Wait.h"
 
 using namespace bcos;
 using namespace bcos::protocol;
 using namespace bcos::txpool;
 
-TransactionStatus TxValidator::verify(bcos::protocol::Transaction::ConstPtr _tx)
+TransactionStatus TxValidator::verify(const bcos::protocol::Transaction& _tx)
 {
-    if (_tx->invalid())
+    if (_tx.invalid()) [[unlikely]]
     {
         return TransactionStatus::InvalidSignature;
     }
     // check groupId and chainId
-    if (_tx->groupId() != m_groupId)
+    if (_tx.groupId() != m_groupId &&
+        _tx.type() == static_cast<uint8_t>(TransactionType::BCOSTransaction)) [[unlikely]]
     {
         return TransactionStatus::InvalidGroupId;
     }
-    if (_tx->chainId() != m_chainId)
+    if (_tx.chainId() != m_chainId &&
+        _tx.type() == static_cast<uint8_t>(TransactionType::BCOSTransaction)) [[unlikely]]
     {
         return TransactionStatus::InvalidChainId;
     }
-    // compare with nonces cached in memory
-    auto status = m_txPoolNonceChecker->checkNonce(_tx, false);
-    if (status != TransactionStatus::None)
-    {
-        return status;
-    }
-    status = submittedToChain(_tx);
-    if (status != TransactionStatus::None)
+    if (const auto status = checkTransaction(_tx); status != TransactionStatus::None)
     {
         return status;
     }
     // check signature
     try
     {
-        _tx->verify();
+        _tx.verify(*m_cryptoSuite->hashImpl(), *m_cryptoSuite->signatureImpl());
     }
-    catch (std::exception const& e)
+    catch (...)
     {
         return TransactionStatus::InvalidSignature;
     }
 
     if (isSystemTransaction(_tx))
     {
-        _tx->setSystemTx(true);
+        _tx.setSystemTx(true);
     }
-    m_txPoolNonceChecker->insert(_tx->nonce());
+    m_txPoolNonceChecker->insert(std::string(_tx.nonce()));
+    if (_tx.type() == static_cast<uint8_t>(TransactionType::Web3Transaction))
+    {
+        task::syncWait(m_web3NonceChecker->insertMemoryNonce(
+            std::string(_tx.sender()), std::string(_tx.nonce())));
+    }
     return TransactionStatus::None;
 }
 
-TransactionStatus TxValidator::submittedToChain(bcos::protocol::Transaction::ConstPtr _tx)
+bcos::protocol::TransactionStatus TxValidator::checkTransaction(
+    const bcos::protocol::Transaction& _tx, bool onlyCheckLedgerNonce)
 {
-    // compare with nonces stored on-chain
+    if (_tx.type() == static_cast<uint8_t>(TransactionType::Web3Transaction)) [[unlikely]]
+    {
+        auto const status = checkWeb3Nonce(_tx, onlyCheckLedgerNonce);
+        if (status != TransactionStatus::None)
+        {
+            return status;
+        }
+        return TransactionStatus::None;
+    }
+    // compare with nonces cached in memory, only check nonce in txpool
+    auto status = TransactionStatus::None;
+    if (!onlyCheckLedgerNonce)
+    {
+        status = checkTxpoolNonce(_tx);
+        if (status != TransactionStatus::None)
+        {
+            return status;
+        }
+    }
+    // check ledger nonce and block limit
+    status = checkLedgerNonceAndBlockLimit(_tx);
+    return status;
+}
+
+
+TransactionStatus TxValidator::checkLedgerNonceAndBlockLimit(const bcos::protocol::Transaction& _tx)
+{
+    // compare with nonces stored on-chain, and check block limit inside
     auto status = m_ledgerNonceChecker->checkNonce(_tx);
     if (status != TransactionStatus::None)
     {
         return status;
     }
+    if (isSystemTransaction(_tx))
+    {
+        _tx.setSystemTx(true);
+    }
     return TransactionStatus::None;
+}
+
+TransactionStatus TxValidator::checkTxpoolNonce(const bcos::protocol::Transaction& _tx)
+{
+    return m_txPoolNonceChecker->checkNonce(_tx);
+}
+
+bcos::protocol::TransactionStatus TxValidator::checkWeb3Nonce(
+    const bcos::protocol::Transaction& _tx, bool onlyCheckLedgerNonce)
+{
+    if (_tx.type() != static_cast<uint8_t>(TransactionType::Web3Transaction)) [[likely]]
+    {
+        return TransactionStatus::None;
+    }
+    return task::syncWait(m_web3NonceChecker->checkWeb3Nonce(_tx, onlyCheckLedgerNonce));
 }

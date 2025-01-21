@@ -19,11 +19,13 @@
  */
 #pragma once
 
-#include <bcos-framework/interfaces/multigroup/GroupInfo.h>
+#include <bcos-framework/multigroup/GroupInfo.h>
+#include <bcos-utilities/Error.h>
 #include <json/json.h>
 #include <exception>
 
 #define RPC_IMPL_LOG(LEVEL) BCOS_LOG(LEVEL) << "[RPC][JSONRPC]"
+#define WEB3_LOG(LEVEL) BCOS_LOG(LEVEL) << "[RPC][WEB3]"
 
 namespace bcos
 {
@@ -49,7 +51,6 @@ public:
     JsonRpcException(int32_t _code, std::string const& _msg) : m_code(_code), m_msg(_msg) {}
     const char* what() const noexcept override { return m_msg.c_str(); }
 
-public:
     int32_t code() const noexcept { return m_code; }
     std::string msg() const noexcept { return m_msg; }
 
@@ -70,7 +71,8 @@ enum JsonRpcError : int32_t
     GroupAlreadyExists = -32001,
     NodeAlreadyExists = -32002,
     OperationNotAllowed = -32003,
-    ServiceNotInitCompleted = -320004,
+    ServiceNotInitCompleted = -32004,
+    GroupNotExist = -32005,
 };
 
 struct JsonRequest
@@ -124,17 +126,36 @@ inline void nodeInfoToJson(Json::Value& _response, bcos::group::ChainNodeInfo::P
         item["serviceName"] = it.second;
         _response["serviceInfo"].append(item);
     }
+    // set protocol info
+    auto protocol = _nodeInfo->nodeProtocol();
+    Json::Value protocolResponse;
+    protocolResponse["minSupportedVersion"] = protocol->minVersion();
+    protocolResponse["maxSupportedVersion"] = protocol->maxVersion();
+    protocolResponse["compatibilityVersion"] = _nodeInfo->compatibilityVersion();
+
+    auto featureKeys = Json::Value(Json::arrayValue);
+    for (auto const& key : _nodeInfo->featureKeys())
+    {
+        featureKeys.append(key);
+    }
+    _response["featureKeys"] = std::move(featureKeys);
+    auto supportConfig = Json::Value(Json::arrayValue);
+    for (auto const& config : _nodeInfo->supportConfigs())
+    {
+        supportConfig.append(config);
+    }
+    _response["supportConfigs"] = std::move(supportConfig);
+    _response["protocol"] = protocolResponse;
 }
 
-inline void groupInfoToJson(Json::Value& _response, bcos::group::GroupInfo::Ptr _groupInfo)
+inline void groupInfoToJson(Json::Value& _response, bcos::group::GroupInfo const& _groupInfo)
 {
-    _response["chainID"] = _groupInfo->chainID();
-    _response["groupID"] = _groupInfo->groupID();
-    _response["genesisConfig"] = _groupInfo->genesisConfig();
-    _response["iniConfig"] = _groupInfo->iniConfig();
+    _response["chainID"] = _groupInfo.chainID();
+    _response["groupID"] = _groupInfo.groupID();
+    _response["genesisConfig"] = _groupInfo.genesisConfig();
+    _response["iniConfig"] = _groupInfo.iniConfig();
     _response["nodeList"] = Json::Value(Json::arrayValue);
-    auto nodeInfos = _groupInfo->nodeInfos();
-    for (auto const& it : nodeInfos)
+    for (auto const& it : _groupInfo.nodeInfoList())
     {
         Json::Value nodeInfoResponse;
         nodeInfoToJson(nodeInfoResponse, it.second);
@@ -148,7 +169,7 @@ inline void groupInfoListToJson(
     for (const auto& groupInfo : _groupInfoList)
     {
         Json::Value item;
-        groupInfoToJson(item, groupInfo);
+        groupInfoToJson(item, *groupInfo);
         _response.append(item);
     }
 }

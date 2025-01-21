@@ -12,7 +12,6 @@
 #include <boost/graph/properties.hpp>
 #include <boost/graph/visitors.hpp>
 #include <boost/throw_exception.hpp>
-#include <algorithm>
 
 using namespace bcos::scheduler;
 
@@ -50,13 +49,17 @@ bool GraphKeyLocks::acquireKeyLock(
         auto vertex = boost::get(VertexPropertyTag(), boost::target(*it, m_graph));
         if (std::get<0>(*vertex) != contextID)
         {
-            SCHEDULER_LOG(TRACE) << boost::format(
-                                        "Acquire key lock failed, request: [%s, %s, %ld, %ld] "
-                                        "exists: [%ld]") %
-                                        contract % key % contextID % seq % std::get<0>(*vertex);
+            KEY_LOCK_LOG(TRACE) << boost::format(
+                                       "Acquire key lock failed, request: [%s:%s] -> %ld | %ld, "
+                                       "exists: [%ld]") %
+                                       contract % toHex(key) % contextID % seq %
+                                       std::get<0>(*vertex);
 
             // Key lock holding by another context
             addEdge(contextVertex, keyVertex, seq);
+            KEY_LOCK_LOG(TRACE) << " " << contextID << " | " << seq << " -> [["
+                                << std::string(contract) << ":" << toHex(key) << "]]";
+
             return false;
         }
     }
@@ -66,9 +69,11 @@ bool GraphKeyLocks::acquireKeyLock(
 
     // Add an own edge
     addEdge(keyVertex, contextVertex, seq);
+    KEY_LOCK_LOG(TRACE) << " [" << std::string(contract) << ":" << toHex(key) << "]  -> "
+                        << contextID << " | " << seq;
 
-    SCHEDULER_LOG(TRACE) << "Acquire key lock success, contract: " << contract << " key: " << key
-                         << " contextID: " << contextID << " seq: " << seq;
+    SCHEDULER_LOG(TRACE) << "Acquire key lock success, contract: " << std::string(contract)
+                         << " key: " << key << " contextID: " << contextID << " seq: " << seq;
 
     return true;
 }
@@ -104,7 +109,14 @@ std::vector<std::string> GraphKeyLocks::getKeyLocksNotHoldingByContext(
 
 void GraphKeyLocks::releaseKeyLocks(int64_t contextID, int64_t seq)
 {
+    if (m_vertexes.count(Vertex(contextID)) == 0)
+    {
+        return;
+    }
+
     SCHEDULER_LOG(TRACE) << "Release key lock, contextID: " << contextID << " seq: " << seq;
+
+    KEY_LOCK_LOG(TRACE) << " [*****] -> " << contextID << " | " << seq;
     auto vertex = touchContext(contextID);
 
     auto edgeRemoveFunc = [seq, graph = &m_graph](auto range) mutable -> bool {
@@ -119,7 +131,7 @@ void GraphKeyLocks::releaseKeyLocks(int64_t contextID, int64_t seq)
             if (edgeSeq == seq)
             {
                 ++removed;
-                if (bcos::LogLevel::TRACE >= bcos::c_fileLogLevel)
+                if (bcos::LogLevel::TRACE <= bcos::c_fileLogLevel)
                 {
                     auto source =
                         boost::get(VertexPropertyTag(), boost::source(*range.first, *graph));
@@ -131,8 +143,8 @@ void GraphKeyLocks::releaseKeyLocks(int64_t contextID, int64_t seq)
                     }
 
                     const auto& [contract, key] = std::get<1>(*source);
-                    SCHEDULER_LOG(TRACE)
-                        << "Releasing key lock, contract: " << contract << " key: " << key;
+                    SCHEDULER_LOG(TRACE) << "Releasing key lock, contract: " << contract
+                                         << " key: " << bcos::toHexString(key);
                 }
                 boost::remove_edge(*range.first, *graph);
             }

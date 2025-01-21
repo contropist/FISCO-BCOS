@@ -17,6 +17,7 @@
  *  @author xingqiangbai
  *  @date 20200921
  */
+#ifdef WITH_WASM
 #include "Metric.h"
 #include <limits>
 
@@ -24,6 +25,7 @@ namespace bcos
 {
 namespace wasm
 {
+using bcos::wasm::Instruction;
 InstructionTable GetInstructionTable()
 {
     auto defaultInstructionTable = InstructionTable{};
@@ -246,3 +248,4 @@ InstructionTable GetInstructionTable()
 
 }  // namespace wasm
 }  // namespace bcos
+#endif

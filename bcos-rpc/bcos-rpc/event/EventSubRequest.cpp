@@ -18,10 +18,10 @@
  * @date 2021-09-03
  */
 
+#include <bcos-framework/Common.h>
 #include <bcos-rpc/event/Common.h>
 #include <bcos-rpc/event/EventSubRequest.h>
 #include <bcos-rpc/event/EventSubTask.h>
-#include <bcos-utilities/Log.h>
 #include <json/json.h>
 #include <exception>
 
@@ -92,14 +92,13 @@ bool EventSubUnsubRequest::fromJson(const std::string& _request)
         } while (0);
 
         EVENT_REQUEST(ERROR) << LOG_BADGE("fromJson") << LOG_DESC("invalid event sub request")
-                             << LOG_KV("request", _request) << LOG_KV("errorMessage", errorMessage);
+                             << LOG_KV("request", _request) << LOG_KV("message", errorMessage);
     }
     catch (const std::exception& e)
     {
         EVENT_REQUEST(ERROR) << LOG_BADGE("fromJson") << LOG_DESC("invalid json object")
 
-                             << LOG_KV("request", _request)
-                             << LOG_KV("error", std::string(e.what()));
+                             << LOG_KV("request", _request) << LOG_KV("msg", std::string(e.what()));
     }
 
     return false;
@@ -231,7 +230,7 @@ bool EventSubRequest::fromJson(const std::string& _request)
                     {
                         address = address.substr(2);
                     }
-                    std::transform(address.begin(), address.end(), address.begin(), ::tolower);
+                    // std::transform(address.begin(), address.end(), address.begin(), ::tolower);
                     params->addAddress(address);
                 }
             }
@@ -282,14 +281,13 @@ bool EventSubRequest::fromJson(const std::string& _request)
         } while (0);
 
         EVENT_REQUEST(ERROR) << LOG_BADGE("fromJson") << LOG_DESC("invalid event sub request")
-                             << LOG_KV("request", _request) << LOG_KV("errorMessage", errorMessage);
+                             << LOG_KV("request", _request) << LOG_KV("message", errorMessage);
     }
     catch (const std::exception& e)
     {
         EVENT_REQUEST(ERROR) << LOG_BADGE("fromJson") << LOG_DESC("invalid json object")
 
-                             << LOG_KV("request", _request)
-                             << LOG_KV("error", std::string(e.what()));
+                             << LOG_KV("request", _request) << LOG_KV("msg", std::string(e.what()));
     }
 
     return false;

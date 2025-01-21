@@ -28,19 +28,31 @@ using namespace bcos::crypto;
 
 void StateMachine::asyncApply(ssize_t _timeout, ProposalInterface::ConstPtr _lastAppliedProposal,
     ProposalInterface::Ptr _proposal, ProposalInterface::Ptr _executedProposal,
-    std::function<void(bool)> _onExecuteFinished)
+    std::function<void(int64_t)> _onExecuteFinished)
 {
+    auto self = weak_from_this();
     // Note: async here to increase performance
     m_worker->enqueue(
-        [this, _timeout, _lastAppliedProposal, _proposal, _executedProposal, _onExecuteFinished]() {
-            this->apply(
+        [self, _timeout, _lastAppliedProposal, _proposal, _executedProposal, _onExecuteFinished]() {
+            auto stateMachine = self.lock();
+            if (!stateMachine)
+            {
+                return;
+            }
+            stateMachine->apply(
                 _timeout, _lastAppliedProposal, _proposal, _executedProposal, _onExecuteFinished);
         });
 }
 
+void StateMachine::asyncPreApply(
+    ProposalInterface::Ptr _proposal, std::function<void(bool)> _onPreApplyFinished)
+{
+    preApply(std::move(_proposal), std::move(_onPreApplyFinished));
+}
+
 void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedProposal,
     ProposalInterface::Ptr _proposal, ProposalInterface::Ptr _executedProposal,
-    std::function<void(bool)> _onExecuteFinished)
+    std::function<void(int64_t)> _onExecuteFinished)
 {
     if (_proposal->index() <= _lastAppliedProposal->index())
     {
@@ -49,7 +61,7 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
                                << LOG_KV("lastAppliedProposal", _lastAppliedProposal->index());
         if (_onExecuteFinished)
         {
-            _onExecuteFinished(false);
+            _onExecuteFinished(-1);
         }
         return;
     }
@@ -60,7 +72,7 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
     {
         if (_onExecuteFinished)
         {
-            _onExecuteFinished(false);
+            _onExecuteFinished(-1);
         }
         return;
     }
@@ -70,7 +82,7 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
         ParentInfoList parentInfoList;
         ParentInfo parentInfo{_lastAppliedProposal->index(), _lastAppliedProposal->hash()};
         parentInfoList.push_back(parentInfo);
-        blockHeader->setParentInfo(std::move(parentInfoList));
+        blockHeader->setParentInfo(parentInfoList);
         CONSENSUS_LOG(DEBUG) << LOG_DESC("setParentInfo for the proposal")
                              << LOG_KV("proposalIndex", _proposal->index())
                              << LOG_KV("lastAppliedProposal", _lastAppliedProposal->index())
@@ -82,6 +94,8 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
                              << LOG_KV("lastAppliedIndex", _lastAppliedProposal->index())
                              << LOG_KV("proposal", _proposal->index());
     }
+    blockHeader->calculateHash(*m_blockFactory->cryptoSuite()->hashImpl());
+
     // calls dispatcher to execute the block
     auto startT = utcTime();
     m_scheduler->executeBlock(block, false,
@@ -96,13 +110,13 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
             {
                 CONSENSUS_LOG(WARNING) << LOG_DESC("asyncExecuteBlock failed")
                                        << LOG_KV("number", blockHeader->number())
-                                       << LOG_KV("errorCode", _error->errorCode())
-                                       << LOG_KV("errorInfo", _error->errorMessage());
-                _onExecuteFinished(false);
+                                       << LOG_KV("code", _error->errorCode())
+                                       << LOG_KV("message", _error->errorMessage());
+                _onExecuteFinished(_error->errorCode());
                 return;
             }
             auto execT = (double)(utcTime() - startT) / (double)(block->transactionsHashSize());
-            CONSENSUS_LOG(INFO) << LOG_DESC("asyncExecuteBlock success")
+            CONSENSUS_LOG(INFO) << METRIC << LOG_DESC("asyncExecuteBlock success")
                                 << LOG_KV("sysBlock", _sysBlock)
                                 << LOG_KV("number", _blockHeader->number())
                                 << LOG_KV("result", _blockHeader->hash().abridged())
@@ -110,7 +124,6 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
                                 << LOG_KV("txsRoot", _blockHeader->txsRoot().abridged())
                                 << LOG_KV("receiptsRoot", _blockHeader->receiptsRoot().abridged())
                                 << LOG_KV("stateRoot", _blockHeader->stateRoot().abridged())
-                                << LOG_KV("txs", block->transactionsHashSize())
                                 << LOG_KV("timeCost", (utcTime() - startT))
                                 << LOG_KV("execPerTx", execT);
             if (_blockHeader->number() != blockHeader->number())
@@ -131,7 +144,38 @@ void StateMachine::apply(ssize_t, ProposalInterface::ConstPtr _lastAppliedPropos
             _executedProposal->setExtraData(_proposal->data());
             // The _onExecuteFinished callback itself does the asynchronous logic, so there is no
             // need to use m_worker to re-synchronize it here.
-            _onExecuteFinished(true);
+            _onExecuteFinished(0);
         });
-    return;
+}
+
+void StateMachine::preApply(
+    ProposalInterface::Ptr _proposal, std::function<void(bool)> _onPreApplyFinished)
+{
+    auto block = m_blockFactory->createBlock(_proposal->data());
+
+    auto startT = utcTime();
+    m_scheduler->preExecuteBlock(block, false,
+        [block, startT, _onPreApplyFinished = std::move(_onPreApplyFinished)](Error::Ptr&& error) {
+            if (!error)
+            {
+                CONSENSUS_LOG(DEBUG)
+                    << LOG_BADGE("prepareBlockExecutive") << LOG_DESC("preApply")
+                    << LOG_KV("blockNumber", block->blockHeaderConst()->number())
+                    << LOG_KV("blockHeader.timestamps", block->blockHeaderConst()->timestamp())
+                    << LOG_KV("timeCost", (utcTime() - startT));
+                _onPreApplyFinished(true);
+            }
+            else
+            {
+                CONSENSUS_LOG(ERROR)
+                    << LOG_BADGE("prepareBlockExecutive") << LOG_DESC("preApply failed!")
+                    << LOG_KV("code", error->errorCode())
+                    << LOG_KV("message", error->errorMessage())
+                    << LOG_KV("message", error->errorMessage())
+                    << LOG_KV("blockNumber", block->blockHeaderConst()->number())
+                    << LOG_KV("blockHeader.timestamps", block->blockHeaderConst()->timestamp())
+                    << LOG_KV("timeCost", (utcTime() - startT));
+                _onPreApplyFinished(false);
+            }
+        });
 }

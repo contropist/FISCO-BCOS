@@ -1,45 +1,38 @@
 cmake_minimum_required(VERSION 3.14)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum OS X deployment version")
 
-include(Version)
 project(bcos-storage VERSION ${VERSION})
 
-option(USE_TiKV "build tikv storage or not" OFF)
+find_package(zstd REQUIRED)
+find_package(RocksDB REQUIRED)
 
-set(SRC_LIST src/Common.cpp)
-if(USE_TiKV)
-    list(APPEND SRC_LIST src/TiKVStorage.cpp)
-else()
-    list(APPEND SRC_LIST src/RocksDBStorage.cpp)
-endif()
+find_package(Boost REQUIRED serialization thread context filesystem)
 
-hunter_add_package(zstd)
-find_package(zstd CONFIG REQUIRED)
-hunter_add_package(rocksdb)
-find_package(RocksDB CONFIG REQUIRED)
+set(SRC_LIST bcos-storage/Common.cpp)
+list(APPEND SRC_LIST bcos-storage/RocksDBStorage.cpp)
 
-find_package(Boost CONFIG QUIET REQUIRED serialization thread context)
+set(LIB_LIST ${TABLE_TARGET} bcos-framework Boost::serialization Boost::filesystem zstd::libzstd_static RocksDB::rocksdb ittapi)
+
+if (WITH_TIKV)
+    include(ProjectTiKVClient)
+    list(APPEND SRC_LIST bcos-storage/TiKVStorage.cpp)
+    list(APPEND LIB_LIST kv_client)
+    # find_package(gRPC CONFIG REQUIRED)
+    # list(APPEND LIB_LIST kv_client gRPC::gpr gRPC::upb gRPC::grpc gRPC::grpc++)
+endif ()
 
 add_library(${STORAGE_TARGET} ${SRC_LIST})
-target_link_libraries(${STORAGE_TARGET} PUBLIC ${TABLE_TARGET} Boost::serialization zstd::libzstd_static)
-if(USE_TiKV)
-    target_link_libraries(${STORAGE_TARGET} PUBLIC kv_client)
-else()
-target_link_libraries(${STORAGE_TARGET} PUBLIC RocksDB::rocksdb)
+target_include_directories(${STORAGE_TARGET} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include/bcos-storage>)
+target_link_libraries(${STORAGE_TARGET} PUBLIC ${LIB_LIST})
+set_target_properties(${STORAGE_TARGET} PROPERTIES UNITY_BUILD "ON")
+
+if (APPLE)
+  target_link_libraries(${STORAGE_TARGET} PUBLIC "-framework SystemConfiguration")
 endif()
 
-if (TESTS)
-    enable_testing()
-    set(ENV{CTEST_OUTPUT_ON_FAILURE} True)
-    add_subdirectory(test)
-endif()
-
-if(USE_TiKV)
-    message(STATUS "USE_TiKV: ${USE_TiKV}")
-    include(ProjectTiKVClient)
-endif()
-
-option(TOOLS "build tools" OFF)
-if(TOOLS)
-    add_subdirectory(tools)
+if(TESTS)
+  enable_testing()
+  set(ENV{CTEST_OUTPUT_ON_FAILURE} True)
+  add_subdirectory(test)
 endif()

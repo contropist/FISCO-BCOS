@@ -21,30 +21,56 @@
 #pragma once
 
 #include <bcos-utilities/Common.h>
-#include <set>
-#include <string>
-#include <vector>
+#include <boost/asio/buffer.hpp>
+#include <any>
 
-namespace bcos
+
+namespace bcos::gateway
 {
-namespace gateway
+
+struct EncodedMessage
 {
+    bcos::bytes header;
+    bcos::bytes payload;
+    bool compress = true;
+
+    inline std::size_t dataSize() const { return headerSize() + payloadSize(); }
+    inline std::size_t headerSize() const { return header.size(); }
+    inline std::size_t payloadSize() const { return payload.size(); }
+};
+
 class Message
 {
 public:
     using Ptr = std::shared_ptr<Message>;
+    using ConstPtr = std::shared_ptr<const Message>;
 
-public:
-    virtual ~Message() {}
+    Message() = default;
+    Message(const Message&) = delete;
+    Message(Message&&) = delete;
+    Message& operator=(Message&&) = delete;
+    Message& operator=(const Message&) = delete;
+    virtual ~Message() = default;
 
+    virtual uint32_t lengthDirect() const = 0;
     virtual uint32_t length() const = 0;
     virtual uint32_t seq() const = 0;
     virtual uint16_t version() const = 0;
     virtual uint16_t packetType() const = 0;
     virtual uint16_t ext() const = 0;
     virtual bool isRespPacket() const = 0;
-    virtual bool encode(bcos::bytes& _buffer) = 0;
-    virtual ssize_t decode(bytesConstRef _buffer) = 0;
+
+    [[deprecated("Use encode(EncodedMessage& _buffer)")]] virtual bool encode(
+        bcos::bytes& _buffer) = 0;
+
+    virtual int32_t decode(const bytesConstRef& _buffer) = 0;
+    virtual bool encode(EncodedMessage& _buffer) const = 0;
+    virtual bool encodeHeader(bytes& _buffer) const = 0;
+    virtual const std::any& extAttributes() const = 0;
+
+    // TODO: move the follow interfaces to P2PMessage
+    virtual std::string const& srcP2PNodeID() const = 0;
+    virtual std::string const& dstP2PNodeID() const = 0;
 };
 
 class MessageFactory
@@ -52,8 +78,13 @@ class MessageFactory
 public:
     using Ptr = std::shared_ptr<MessageFactory>;
 
-public:
-    virtual ~MessageFactory() {}
+    MessageFactory() = default;
+    MessageFactory(const MessageFactory&) = delete;
+    MessageFactory(MessageFactory&&) = delete;
+    MessageFactory& operator=(const MessageFactory&) = delete;
+    MessageFactory&& operator=(MessageFactory&&) = delete;
+
+    virtual ~MessageFactory() = default;
     virtual Message::Ptr buildMessage() = 0;
 
     virtual uint32_t newSeq()
@@ -61,8 +92,9 @@ public:
         uint32_t seq = ++m_seq;
         return seq;
     }
+
+private:
     std::atomic<uint32_t> m_seq = {1};
 };
 
-}  // namespace gateway
-}  // namespace bcos
+}  // namespace bcos::gateway

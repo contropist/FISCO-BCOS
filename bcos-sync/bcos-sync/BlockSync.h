@@ -19,16 +19,17 @@
  * @date 2021-05-24
  */
 #pragma once
+#include "bcos-framework/protocol/ProtocolTypeDef.h"
 #include "bcos-sync/BlockSyncConfig.h"
 #include "bcos-sync/state/DownloadingQueue.h"
 #include "bcos-sync/state/SyncPeerStatus.h"
-#include <bcos-framework/interfaces/sync/BlockSyncInterface.h>
+#include "bcos-sync/utilities/SyncTreeTopology.h"
+#include "bcos-tool/NodeTimeMaintenance.h"
+#include <bcos-framework/sync/BlockSyncInterface.h>
 #include <bcos-utilities/ThreadPool.h>
 #include <bcos-utilities/Timer.h>
 #include <bcos-utilities/Worker.h>
-namespace bcos
-{
-namespace sync
+namespace bcos::sync
 {
 class BlockSync : public BlockSyncInterface,
                   public Worker,
@@ -36,23 +37,29 @@ class BlockSync : public BlockSyncInterface,
 {
 public:
     using Ptr = std::shared_ptr<BlockSync>;
+    // FIXME: make idle configable
     BlockSync(BlockSyncConfig::Ptr _config, unsigned _idleWaitMs = 200);
-    ~BlockSync() override {}
+    ~BlockSync() override = default;
 
     void start() override;
     void stop() override;
 
-    // called by the frontService to dispatch message
+    // called by the frontService to dispatch message, server-side
     void asyncNotifyBlockSyncMessage(Error::Ptr _error, std::string const& _uuid,
         bcos::crypto::NodeIDPtr _nodeID, bytesConstRef _data,
-        std::function<void(Error::Ptr _error)> _onRecv) override;
+        std::function<void(Error::Ptr)> _onRecv) override;
 
+    // consensus notify sync module to try to commit block
     void asyncNotifyNewBlock(bcos::ledger::LedgerConfig::Ptr _ledgerConfig,
         std::function<void(Error::Ptr)> _onRecv) override;
+    // for rpc
     void asyncGetSyncInfo(std::function<void(Error::Ptr, std::string)> _onGetSyncInfo) override;
 
-    void asyncNotifyCommittedIndex(bcos::protocol::BlockNumber _number,
-        std::function<void(Error::Ptr _error)> _onRecv) override
+    std::vector<PeerStatus::Ptr> getPeerStatus() override;
+
+    // consensus notify sync module committed block number
+    void asyncNotifyCommittedIndex(
+        bcos::protocol::BlockNumber _number, std::function<void(Error::Ptr)> _onRecv) override
     {
         m_config->setCommittedProposalNumber(_number);
         if (_onRecv)
@@ -74,22 +81,38 @@ public:
     // used to optimize consensus
     bool faultyNode(bcos::crypto::NodeIDPtr _nodeID) override;
 
+    void enableAsMaster(bool _masterNode);
+
+    void setAllowFreeNodeSync(bool flag) { m_allowFreeNode = flag; }
+
+    void setFaultyNodeBlockDelta(bcos::protocol::BlockNumber _delta)
+    {
+        c_FaultyNodeBlockDelta = _delta;
+    }
+
+    bool isSyncing() const override;
+
+    virtual std::optional<std::tuple<bcos::protocol::BlockNumber, bcos::protocol::BlockNumber>>
+    getSyncStatus() const override;
+
 protected:
     virtual void asyncNotifyBlockSyncMessage(Error::Ptr _error, bcos::crypto::NodeIDPtr _nodeID,
-        bytesConstRef _data, std::function<void(bytesConstRef _respData)> _sendResponse,
-        std::function<void(Error::Ptr _error)> _onRecv);
+        bytesConstRef _data, std::function<void(bytesConstRef)> _sendResponse,
+        std::function<void(Error::Ptr)> _onRecv);
 
     void initSendResponseHandler();
     void executeWorker() override;
     void workerProcessLoop() override;
-    // for message handle
+    /// for message handle
+    // call when receive BlockStatusPacket, update peers status
     virtual void onPeerStatus(bcos::crypto::NodeIDPtr _nodeID, BlockSyncMsgInterface::Ptr _syncMsg);
+    // call when receive BlockResponsePacket, receive block and push in queue
     virtual void onPeerBlocks(bcos::crypto::NodeIDPtr _nodeID, BlockSyncMsgInterface::Ptr _syncMsg);
+    // call when receive BlockRequestPacket, send block to peer
     virtual void onPeerBlocksRequest(
         bcos::crypto::NodeIDPtr _nodeID, BlockSyncMsgInterface::Ptr _syncMsg);
 
     virtual bool shouldSyncing();
-    virtual bool isSyncing();
     virtual void tryToRequestBlocks();
     virtual void onDownloadTimeout();
     // block execute and submit
@@ -99,6 +122,8 @@ protected:
     virtual void maintainPeersConnection();
     // block requests
     virtual void maintainBlockRequest();
+    // send sync status by tree
+    virtual void sendSyncStatusByTree();
     // broadcast sync status
     virtual void broadcastSyncStatus();
 
@@ -106,10 +131,16 @@ protected:
 
     virtual void downloadFinish();
 
-protected:
-    void requestBlocks(bcos::protocol::BlockNumber _from, bcos::protocol::BlockNumber _to);
-    void fetchAndSendBlock(DownloadRequestQueue::Ptr _reqQueue, bcos::crypto::PublicPtr _peer,
-        bcos::protocol::BlockNumber _number);
+    // update SyncTreeTopology node info
+    virtual void updateTreeTopologyNodeInfo();
+
+    virtual void syncArchivedBlockBody(bcos::protocol::BlockNumber archivedBlockNumber);
+    virtual void verifyAndCommitArchivedBlock(bcos::protocol::BlockNumber archivedBlockNumber);
+
+    void requestBlocks(
+        bcos::protocol::BlockNumber _from, bcos::protocol::BlockNumber _to, int32_t blockDataFlag);
+    void fetchAndSendBlock(bcos::crypto::PublicPtr const& _peer,
+        bcos::protocol::BlockNumber _number, int32_t _blockDataFlag);
     void printSyncInfo();
 
 protected:
@@ -117,8 +148,7 @@ protected:
     SyncPeerStatus::Ptr m_syncStatus;
     DownloadingQueue::Ptr m_downloadingQueue;
 
-    std::function<void(std::string const& _id, int _moduleID, bcos::crypto::NodeIDPtr _dstNode,
-        bytesConstRef _data)>
+    std::function<void(std::string const&, int, bcos::crypto::NodeIDPtr, bytesConstRef)>
         m_sendResponseHandler;
 
     bcos::ThreadPool::Ptr m_downloadBlockProcessor = nullptr;
@@ -133,6 +163,26 @@ protected:
     boost::mutex x_signalled;
     bcos::protocol::BlockNumber m_waterMark = 10;
     bcos::protocol::BlockNumber c_FaultyNodeBlockDelta = 50;
+
+    std::atomic_bool m_masterNode = {false};
+    bool m_allowFreeNode = false;
+
+    mutable SharedMutex x_archivedBlockQueue;
+
+private:
+    struct BlockLess
+    {
+        bool operator()(bcos::protocol::Block::Ptr const& _first,
+            bcos::protocol::Block::Ptr const& _second) const
+        {
+            return _first->blockHeader()->number() < _second->blockHeader()->number();
+        }
+    };
+    std::priority_queue<bcos::protocol::Block::Ptr, bcos::protocol::Blocks, BlockLess>
+        m_archivedBlockQueue;  // top block is the max number block
+    std::chrono::system_clock::time_point m_lastArchivedRequestTime =
+        std::chrono::system_clock::now();
+
+    SyncTreeTopology::Ptr m_syncTreeTopology{nullptr};
 };
-}  // namespace sync
-}  // namespace bcos
+}  // namespace bcos::sync

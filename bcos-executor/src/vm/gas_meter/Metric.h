@@ -19,6 +19,7 @@
  */
 #pragma once
 #include <array>
+#include <cstdint>
 #include <string>
 
 // #define WASM_FLOAT_ENABLE
@@ -31,7 +32,7 @@ struct Instruction
     std::string Name;
     uint8_t Opcode;
     uint32_t Cost;
-    Instruction() = default;
+    // Instruction() = default;
 
     enum Enum : uint32_t
     {

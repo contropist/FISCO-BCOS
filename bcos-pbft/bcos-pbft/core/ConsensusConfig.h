@@ -19,21 +19,21 @@
  * @date 2021-04-09
  */
 #pragma once
-#include "../framework/ConsensusConfigInterface.h"
 #include "Common.h"
+#include "bcos-framework/consensus/ConsensusConfigInterface.h"
+#include "bcos-framework/protocol/Protocol.h"
 #include <bcos-crypto/interfaces/crypto/KeyPairInterface.h>
 #include <bcos-utilities/Common.h>
 
-namespace bcos
-{
-namespace consensus
+namespace bcos::consensus
 {
 class ConsensusConfig : public ConsensusConfigInterface
 {
 public:
     using Ptr = std::shared_ptr<ConsensusConfig>;
+    using ConstPtr = std::shared_ptr<const ConsensusConfig>;
     explicit ConsensusConfig(bcos::crypto::KeyPairInterface::Ptr _keyPair)
-      : m_keyPair(_keyPair), m_consensusNodeList(std::make_shared<ConsensusNodeList>())
+      : m_keyPair(std::move(_keyPair))
     {}
     virtual ~ConsensusConfig() {}
 
@@ -43,14 +43,17 @@ public:
     // the nodeIndex of this node
     IndexType nodeIndex() const override { return m_nodeIndex; }
 
-    bool isConsensusNode() const override { return (m_nodeIndex != NON_CONSENSUS_NODE); }
+    bool isConsensusNode() const override
+    {
+        return (m_nodeIndex != NON_CONSENSUS_NODE) && m_asMasterNode.load();
+    }
     // the consensus node list
     ConsensusNodeList consensusNodeList() const override;
     bcos::crypto::NodeIDs consensusNodeIDList(bool _excludeSelf = true) const override;
 
     uint64_t consensusTimeout() const override { return m_consensusTimeout; }
 
-    void setConsensusNodeList(ConsensusNodeList& _consensusNodeList) override;
+    void setConsensusNodeList(ConsensusNodeList _consensusNodeList) override;
 
     void setConsensusTimeout(uint64_t _consensusTimeout) override
     {
@@ -90,7 +93,7 @@ public:
 
     virtual void updateQuorum() = 0;
     IndexType getNodeIndexByNodeID(bcos::crypto::PublicPtr _nodeID);
-    ConsensusNodeInterface::Ptr getConsensusNodeByIndex(IndexType _nodeIndex);
+    ConsensusNode* getConsensusNodeByIndex(IndexType _nodeIndex);
     bcos::crypto::KeyPairInterface::Ptr keyPair() { return m_keyPair; }
 
     virtual void setBlockTxCountLimit(uint64_t _blockTxCountLimit)
@@ -106,31 +109,62 @@ public:
 
     IndexType consensusNodesNum() const { return m_consensusNodeNum.load(); }
 
+    void setObserverNodeList(ConsensusNodeList _observerNodeList);
 
-private:
-    bool compareConsensusNode(ConsensusNodeList const& _left, ConsensusNodeList const& _right);
+    bool asMasterNode() const { return m_asMasterNode.load(); }
+    virtual void enableAsMasterNode(bool _isMasterNode)
+    {
+        m_asMasterNode.store(_isMasterNode);
+        if (m_versionNotification)
+        {
+            m_versionNotification(m_compatibilityVersion);
+        }
+    }
+
+    virtual void registerVersionInfoNotification(std::function<void(uint32_t)> _versionNotification)
+    {
+        m_versionNotification = std::move(_versionNotification);
+    }
+
+    uint32_t compatibilityVersion() const { return m_compatibilityVersion; }
+
+    virtual bool shouldRotateSealers(protocol::BlockNumber) const { return false; }
+    static bool compareConsensusNode(
+        ConsensusNodeList const& _left, ConsensusNodeList const& _right);
+
+    ledger::Features features() const override;
+    void setFeatures(ledger::Features features) override;
 
 protected:
+    static bool isNodeExist(ConsensusNode const& _node, ConsensusNodeList const& _nodeList);
+
     bcos::crypto::KeyPairInterface::Ptr m_keyPair;
-    std::atomic<IndexType> m_nodeIndex = {0};
+    std::atomic<IndexType> m_nodeIndex = 0;
     std::atomic<IndexType> m_consensusNodeNum = {0};
 
-    ConsensusNodeListPtr m_consensusNodeList;
+    ConsensusNodeList m_consensusNodeList;
     mutable bcos::SharedMutex x_consensusNodeList;
+    ConsensusNodeList m_observerNodeList;
+    mutable bcos::SharedMutex x_observerNodeList;
+
+    std::atomic_bool m_consensusNodeListUpdated = {false};
+    std::atomic_bool m_observerNodeListUpdated = {false};
+    std::atomic_bool m_syncingState = {false};
+    std::atomic_bool m_asMasterNode = {false};
+    uint32_t m_compatibilityVersion = (uint32_t)(bcos::protocol::DEFAULT_VERSION);
 
     // default timeout is 3000ms
     std::atomic<uint64_t> m_consensusTimeout = {3000};
+    constexpr const static uint64_t s_consensusTimeout = 3000;
+
     // default blockTxCountLimit is 1000
     std::atomic<uint64_t> m_blockTxCountLimit = {1000};
-
     ProposalInterface::Ptr m_committedProposal;
     mutable bcos::SharedMutex x_committedProposal;
 
     std::atomic<bcos::protocol::BlockNumber> m_progressedIndex = {0};
-    std::atomic_bool m_syncingState = {false};
     bcos::protocol::BlockNumber m_syncingHighestNumber = {0};
-
-    std::atomic_bool m_nodeUpdated = {false};
+    std::function<void(uint32_t _version)> m_versionNotification;
+    ledger::Features m_features;
 };
-}  // namespace consensus
-}  // namespace bcos
+}  // namespace bcos::consensus

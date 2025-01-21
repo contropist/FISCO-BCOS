@@ -18,6 +18,7 @@
  * @date 2021-06-10
  */
 #include "CommandHelper.h"
+#include "Common.h"
 #include <include/BuildInfo.h>
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
@@ -30,6 +31,16 @@ void bcos::initializer::printVersion()
               << FISCO_BCOS_BUILD_TYPE << std::endl;
     std::cout << "Git Branch         : " << FISCO_BCOS_BUILD_BRANCH << std::endl;
     std::cout << "Git Commit         : " << FISCO_BCOS_COMMIT_HASH << std::endl;
+}
+
+void bcos::initializer::showNodeVersionMetric()
+{
+    INITIALIZER_LOG(INFO) << METRIC << LOG_KV("binaryVersion", FISCO_BCOS_PROJECT_VERSION)
+                          << LOG_KV("buildTime", FISCO_BCOS_BUILD_TIME)
+                          << LOG_KV("buildType", FISCO_BCOS_BUILD_TYPE)
+                          << LOG_KV("platform", FISCO_BCOS_BUILD_PLATFORM)
+                          << LOG_KV("gitBranch", FISCO_BCOS_BUILD_BRANCH)
+                          << LOG_KV("commitHash", FISCO_BCOS_COMMIT_HASH);
 }
 
 void bcos::initializer::initCommandLine(int argc, char* argv[])
@@ -70,7 +81,12 @@ bcos::initializer::Params bcos::initializer::initAirNodeCommandLine(
         boost::program_options::value<std::string>()->default_value("./config.ini"),
         "config file path, eg. config.ini")("genesis,g",
         boost::program_options::value<std::string>()->default_value("./config.genesis"),
-        "genesis config file path, eg. genesis.ini");
+        "genesis config file path, eg. genesis.ini")("prune,p", "prune the node data")("snapshot,s",
+        boost::program_options::value<bool>(),
+        "generate snapshot with or without txs and receipts, if true generate snapshot with txs "
+        "and receipts")(
+        "output,o", boost::program_options::value<std::string>(), "snapshot output directory")(
+        "import,i", boost::program_options::value<std::string>(), "import snapshot from directory");
 
     if (_autoSendTx)
     {
@@ -137,5 +153,42 @@ bcos::initializer::Params bcos::initializer::initAirNodeCommandLine(
             txSpeed = vm["txSpeed"].as<float>();
         }
     }
-    return bcos::initializer::Params{configPath, genesisFilePath, txSpeed};
+    auto op = Params::operation::None;
+    if (vm.count("prune"))
+    {
+        op = (op | Params::operation::Prune);
+    }
+    std::string snapshotPath("./");
+    if (vm.count("snapshot"))
+    {
+        auto snapshot = vm["snapshot"].as<bool>();
+        if (snapshot)
+        {
+            op = (op | Params::operation::Snapshot);
+        }
+        else
+        {
+            op = (op | Params::operation::SnapshotWithoutTxAndReceipt);
+        }
+        if (vm.count("output"))
+        {
+            snapshotPath = vm["output"].as<std::string>();
+        }
+        else
+        {
+            std::cout << "snapshot output directory is not set, use current directory as default";
+        }
+    }
+    if (vm.count("import"))
+    {
+        if (op != Params::operation::None)
+        {
+            std::cout << "import snapshot can not be used with other operations";
+            exit(0);
+        }
+        op = Params::operation::ImportSnapshot;
+        snapshotPath = vm["import"].as<std::string>();
+    }
+
+    return bcos::initializer::Params{configPath, genesisFilePath, snapshotPath, txSpeed, op};
 }

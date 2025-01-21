@@ -20,7 +20,10 @@
  */
 
 #pragma once
-#include <bcos-framework/interfaces/rpc/RPCInterface.h>
+#include "bcos-rpc/groupmgr/GroupManager.h"
+#include "web3jsonrpc/Web3JsonRpcImpl.h"
+
+#include <bcos-framework/rpc/RPCInterface.h>
 #include <bcos-rpc/amop/AMOPClient.h>
 #include <bcos-rpc/event/EventSub.h>
 #include <bcos-rpc/jsonrpc/JsonRpcImpl_2_0.h>
@@ -42,28 +45,7 @@ public:
     using Ptr = std::shared_ptr<Rpc>;
     Rpc(std::shared_ptr<boostssl::ws::WsService> _wsService,
         bcos::rpc::JsonRpcImpl_2_0::Ptr _jsonRpcImpl, bcos::event::EventSub::Ptr _eventSub,
-        AMOPClient::Ptr _amopClient)
-      : m_wsService(_wsService),
-        m_jsonRpcImpl(_jsonRpcImpl),
-        m_eventSub(_eventSub),
-        m_amopClient(_amopClient)
-    {
-        m_jsonRpcImpl->groupManager()->registerGroupInfoNotifier(
-            [this](bcos::group::GroupInfo::Ptr _groupInfo) { notifyGroupInfo(_groupInfo); });
-
-        m_jsonRpcImpl->groupManager()->registerBlockNumberNotifier(
-            [this](std::string const& _groupID, std::string const& _nodeName,
-                bcos::protocol::BlockNumber _blockNumber) {
-                asyncNotifyBlockNumber(_groupID, _nodeName, _blockNumber, [](Error::Ptr _error) {
-                    if (_error)
-                    {
-                        BCOS_LOG(ERROR) << LOG_DESC("asyncNotifyBlockNumber error")
-                                        << LOG_KV("code", _error->errorCode())
-                                        << LOG_KV("msg", _error->errorMessage());
-                    }
-                });
-            });
-    }
+        AMOPClient::Ptr _amopClient);
 
     virtual ~Rpc() { stop(); }
 
@@ -105,14 +87,39 @@ public:
         m_amopClient->asyncNotifySubscribeTopic(_callback);
     }
 
+    void setWeb3Service(boostssl::ws::WsService::Ptr _web3Service)
+    {
+        m_web3Service = std::move(_web3Service);
+    }
+
+    void setWeb3JsonRpcImpl(bcos::rpc::Web3JsonRpcImpl::Ptr _web3JsonRpcImpl)
+    {
+        m_web3JsonRpcImpl = std::move(_web3JsonRpcImpl);
+    }
+
+    GroupManager::Ptr groupManager() { return m_groupManager; }
+
+    bcos::rpc::Web3JsonRpcImpl::Ptr web3JsonRpc() const { return m_web3JsonRpcImpl; }
+
 protected:
     virtual void notifyGroupInfo(bcos::group::GroupInfo::Ptr _groupInfo);
+
+    virtual void onRecvHandshakeRequest(std::shared_ptr<boostssl::MessageFace> _msg,
+        std::shared_ptr<boostssl::ws::WsSession> _session);
+
+    virtual bool negotiatedVersion(std::shared_ptr<boostssl::MessageFace> _msg,
+        std::shared_ptr<boostssl::ws::WsSession> _session);
 
 private:
     std::shared_ptr<boostssl::ws::WsService> m_wsService;
     bcos::rpc::JsonRpcImpl_2_0::Ptr m_jsonRpcImpl;
     bcos::event::EventSub::Ptr m_eventSub;
     AMOPClient::Ptr m_amopClient;
+    GroupManager::Ptr m_groupManager;
+    boostssl::ws::WsService::Ptr m_web3Service = nullptr;
+    bcos::rpc::Web3JsonRpcImpl::Ptr m_web3JsonRpcImpl = nullptr;
+
+    bcos::protocol::ProtocolInfo::ConstPtr m_localProtocol;
 };
 
 }  // namespace rpc

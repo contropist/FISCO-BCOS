@@ -17,18 +17,15 @@
 # ------------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.10)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "11.1" CACHE STRING "Minimum OS X deployment version")
 
-project(bcos-ledger VERSION "3.0")
-set(VERSION_SUFFIX "-rc2")
+find_package(Boost REQUIRED serialization)
 
-aux_source_directory(src/libledger SRCS)
-aux_source_directory(src/libledger/utilities SRCS)
-
-find_package(Boost CONFIG REQUIRED serialization)
-
-add_library(${LEDGER_TARGET} ${SRCS})
-target_link_libraries(${LEDGER_TARGET} PUBLIC ${CODEC_TARGET} ${TABLE_TARGET} Boost::serialization)
+add_library(${LEDGER_TARGET} bcos-ledger/Ledger.cpp bcos-ledger/LedgerMethods.cpp bcos-ledger/ConsensusNode.cpp)
+target_include_directories(${LEDGER_TARGET} PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include/bcos-ledger>)
+target_link_libraries(${LEDGER_TARGET} PUBLIC ${TOOL_TARGET} ${TARS_PROTOCOL_TARGET} ${CODEC_TARGET} ${TABLE_TARGET} bcos-concepts Boost::serialization)
+set_target_properties(${LEDGER_TARGET} PROPERTIES UNITY_BUILD "ON")
 
 # test related
 if (TESTS)
@@ -37,8 +34,6 @@ if (TESTS)
     add_subdirectory(test)
 endif()
 
-# for code coverage
-if (COVERAGE)
-    include(Coverage)
-    config_coverage("ledger-coverage" "'/usr*' '${CMAKE_CURRENT_SOURCE_DIR}/bcos-cmake-scripts*' '${CMAKE_SOURCE_DIR}/test/mock**' '${CMAKE_SOURCE_DIR}/test/main**'")
-endif ()
+include(GNUInstallDirs)
+install(TARGETS ${LEDGER_TARGET} EXPORT fiscobcosTargets ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+install(DIRECTORY "bcos-ledger" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}" FILES_MATCHING PATTERN "*.h")

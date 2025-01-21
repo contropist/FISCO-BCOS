@@ -2,18 +2,13 @@
 
 #include "Common.h"
 #include <boost/graph/adjacency_list.hpp>
-#include <boost/graph/depth_first_search.hpp>
-#include <boost/graph/edge_list.hpp>
-#include <boost/graph/graph_selectors.hpp>
-#include <boost/graph/properties.hpp>
-#include <boost/graph/visitors.hpp>
-#include <any>
-#include <forward_list>
 #include <functional>
 #include <gsl/span>
-#include <set>
 #include <string_view>
 #include <variant>
+
+#define KEY_LOCK_LOG(LEVEL) BCOS_LOG(LEVEL) << LOG_BADGE("SCHEDULER") << LOG_BADGE("KEY_LOCK")
+// #define KEY_LOCK_LOG(LEVEL) std::cout << LOG_BADGE("KEY_LOCK")
 
 namespace bcos::scheduler
 {
@@ -32,14 +27,15 @@ public:
     GraphKeyLocks(GraphKeyLocks&&) = delete;
     GraphKeyLocks& operator=(const GraphKeyLocks&) = delete;
     GraphKeyLocks& operator=(GraphKeyLocks&&) = delete;
+    virtual ~GraphKeyLocks() = default;
 
     bool batchAcquireKeyLock(std::string_view contract, gsl::span<std::string const> keyLocks,
         ContextID contextID, Seq seq);
 
-    bool acquireKeyLock(
+    virtual bool acquireKeyLock(
         std::string_view contract, std::string_view key, ContextID contextID, Seq seq);
 
-    std::vector<std::string> getKeyLocksNotHoldingByContext(
+    virtual std::vector<std::string> getKeyLocksNotHoldingByContext(
         std::string_view contract, ContextID excludeContextID) const;
 
     void releaseKeyLocks(ContextID contextID, Seq seq);

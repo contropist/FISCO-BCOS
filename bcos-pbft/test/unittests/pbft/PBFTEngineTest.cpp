@@ -18,6 +18,8 @@
  * @author: yujiechen
  * @date 2021-05-31
  */
+#include "bcos-framework/bcos-framework/testutils/faker/FakeBlock.h"
+#include "bcos-framework/bcos-framework/testutils/faker/FakeBlockHeader.h"
 #include "test/unittests/pbft/PBFTFixture.h"
 #include "test/unittests/protocol/FakePBFTMessage.h"
 #include <bcos-crypto/hash/Keccak256.h>
@@ -56,8 +58,9 @@ void testPBFTEngineWithFaulty(size_t _consensusNodes, size_t _connectedNodes)
     auto cryptoSuite = std::make_shared<CryptoSuite>(hashImpl, signatureImpl, nullptr);
 
     BlockNumber currentBlockNumber = 19;
+    std::cout << "### createFakers: " << currentBlockNumber << std::endl;
     auto fakerMap = createFakers(cryptoSuite, _consensusNodes, currentBlockNumber, _connectedNodes);
-
+    std::cout << "### createFakers: " << currentBlockNumber << " success" << std::endl;
     // check the leader notify the sealer to seal proposals
     IndexType leaderIndex = 0;
     auto leaderFaker = fakerMap[leaderIndex];
@@ -76,7 +79,7 @@ void testPBFTEngineWithFaulty(size_t _consensusNodes, size_t _connectedNodes)
     for (size_t i = 0; i < 3; i++)
     {
         leaderFaker->pbftEngine()->asyncSubmitProposal(
-            false, ref(*blockData), blockHeader->number(), blockHeader->hash(), nullptr);
+            false, *block, blockHeader->number(), blockHeader->hash(), nullptr);
     }
     // Discontinuous case
     auto faker = fakerMap[3];
@@ -85,7 +88,7 @@ void testPBFTEngineWithFaulty(size_t _consensusNodes, size_t _connectedNodes)
     blockData = std::make_shared<bytes>();
     block->encode(*blockData);
     faker->pbftEngine()->asyncSubmitProposal(
-        false, ref(*blockData), blockHeader->number(), blockHeader->hash(), nullptr);
+        false, *block, blockHeader->number(), blockHeader->hash(), nullptr);
 
     // the next leader seal the next block
     IndexType nextLeaderIndex = 1;
@@ -96,7 +99,7 @@ void testPBFTEngineWithFaulty(size_t _consensusNodes, size_t _connectedNodes)
     blockData = std::make_shared<bytes>();
     block->encode(*blockData);
     nextLeaderFacker->pbftEngine()->asyncSubmitProposal(
-        false, ref(*blockData), blockHeader->number(), blockHeader->hash(), nullptr);
+        false, *block, blockHeader->number(), blockHeader->hash(), nullptr);
 
     // handle prepare message and broadcast commit messages
     auto startT = utcTime();
@@ -117,7 +120,7 @@ void testPBFTEngineWithFaulty(size_t _consensusNodes, size_t _connectedNodes)
     blockData = std::make_shared<bytes>();
     block->encode(*blockData);
     faker->pbftEngine()->asyncSubmitProposal(
-        false, ref(*blockData), blockHeader->number(), blockHeader->hash(), nullptr);
+        false, *block, blockHeader->number(), blockHeader->hash(), nullptr);
 
     startT = utcTime();
     while (!shouldExit(fakerMap, currentBlockNumber + 4, _connectedNodes) &&
@@ -129,15 +132,27 @@ void testPBFTEngineWithFaulty(size_t _consensusNodes, size_t _connectedNodes)
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+
+    for (auto& item : fakerMap)
+    {
+        item.second->stop();
+    }
 }
 
+// TODO: Remove this test due to memory access violation
 BOOST_AUTO_TEST_CASE(testPBFTEngineWithAllNonFaulty)
 {
+    boost::log::core::get()->set_logging_enabled(false);
     size_t consensusNodeSize = 10;
     // case1: all non-faulty
+    std::cout << "testPBFTEngineWithFaulty with 10 non-faulty" << std::endl;
     testPBFTEngineWithFaulty(consensusNodeSize, consensusNodeSize);
+    std::cout << "testPBFTEngineWithFaulty with 10 non-faulty success" << std::endl;
     // case2: with f=3 faulty
+    std::cout << "testPBFTEngineWithFaulty with 7 non-faulty" << std::endl;
     testPBFTEngineWithFaulty(consensusNodeSize, 7);
+    std::cout << "testPBFTEngineWithFaulty with 7 non-faulty success" << std::endl;
+    boost::log::core::get()->set_logging_enabled(true);
 }
 
 BOOST_AUTO_TEST_CASE(testHandlePrePrepareMsg)
@@ -163,7 +178,7 @@ BOOST_AUTO_TEST_CASE(testHandlePrePrepareMsg)
     block->encode(*blockData);
 
     // case1: invalid block number
-    auto hash = hashImpl->hash(std::string("invalidCase"));
+    auto hash = hashImpl->hash(bytesConstRef("invalidCase"));
     auto leaderMsgFixture =
         std::make_shared<PBFTMessageFixture>(cryptoSuite, leaderFaker->keyPair());
     auto index = (expectedIndex - 1);

@@ -19,15 +19,15 @@
  * @date 2021-04-13
  */
 #pragma once
-#include "../../config/PBFTConfig.h"
 #include "../../interfaces/PBFTMessageInterface.h"
 #include "PBFTBaseMessage.h"
 #include "bcos-pbft/pbft/protocol/proto/PBFT.pb.h"
 
-namespace bcos
+namespace bcos::consensus
 {
-namespace consensus
-{
+/**
+ * This class is thread-unsafe, should never be writen in multi-thread
+ */
 class PBFTMessage : public PBFTBaseMessage, public PBFTMessageInterface
 {
 public:
@@ -40,14 +40,14 @@ public:
 
     explicit PBFTMessage(std::shared_ptr<PBFTRawMessage> _pbftRawMessage) : PBFTBaseMessage()
     {
-        m_pbftRawMessage = _pbftRawMessage;
+        m_pbftRawMessage = std::move(_pbftRawMessage);
         m_proposals = std::make_shared<PBFTProposalList>();
         PBFTMessage::deserializeToObject();
     }
 
     PBFTMessage(bcos::crypto::CryptoSuite::Ptr _cryptoSuite, bytesConstRef _data) : PBFTMessage()
     {
-        decodeAndSetSignature(_cryptoSuite, _data);
+        decodeAndSetSignature(std::move(_cryptoSuite), _data);
     }
 
     ~PBFTMessage() override
@@ -79,7 +79,7 @@ public:
     virtual void decodeAndSetSignature(
         bcos::crypto::CryptoSuite::Ptr _pbftConfig, bytesConstRef _data);
 
-    bool operator==(PBFTMessage const& _pbftMessage);
+    bool operator==(PBFTMessage const& _pbftMessage) const;
 
     bytesConstRef signatureData() override
     {
@@ -97,6 +97,7 @@ public:
     PBFTMessageInterface::Ptr populateWithoutProposal() override
     {
         auto pbftMessage = std::make_shared<PBFTMessage>();
+        encodeHashFields();
         auto const& hashFieldData = m_pbftRawMessage->hashfieldsdata();
         pbftMessage->pbftRawMessage()->set_hashfieldsdata(
             hashFieldData.data(), hashFieldData.size());
@@ -106,6 +107,19 @@ public:
 
     void encodeHashFields() const;
     void deserializeToObject() override;
+
+    std::string toDebugString() const override
+    {
+        std::stringstream stringstream;
+        stringstream << LOG_KV("type", m_packetType)
+                     << LOG_KV("fromNode", m_from ? m_from->shortHex() : "null")
+                     << LOG_KV("rawMsgProposalsSize",
+                            m_pbftRawMessage ? m_pbftRawMessage->proposals_size() : 0)
+                     << LOG_KV("consensusProposal",
+                            m_consensusProposal ? printPBFTProposal(m_consensusProposal) : "null");
+
+        return stringstream.str();
+    }
 
 protected:
     virtual bcos::crypto::HashType getHashFieldsDataHash(
@@ -120,5 +134,4 @@ private:
 
     mutable bcos::crypto::HashType m_signatureDataHash;
 };
-}  // namespace consensus
-}  // namespace bcos
+}  // namespace bcos::consensus

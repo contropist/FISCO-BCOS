@@ -19,20 +19,19 @@
  */
 #pragma once
 #include "libnetwork/Common.h"
-#include <bcos-framework/interfaces/protocol/ServiceDesc.h>
-#include <bcos-utilities/Exceptions.h>
-#include <tarscpp/servant/Application.h>
 
 #define GATEWAY_LOG(LEVEL) BCOS_LOG(LEVEL) << "[Gateway][Gateway]"
 #define GATEWAY_CONFIG_LOG(LEVEL) BCOS_LOG(LEVEL) << "[Gateway][Config]"
 #define GATEWAY_FACTORY_LOG(LEVEL) BCOS_LOG(LEVEL) << "[Gateway][Factory]"
 #define NODE_MANAGER_LOG(LEVEL) BCOS_LOG(LEVEL) << "[Gateway][GatewayNodeManager]"
 #define ROUTER_LOG(LEVEL) BCOS_LOG(LEVEL) << "[Gateway][Router]"
+#define RATELIMIT_MGR_LOG(LEVEL) BCOS_LOG(LEVEL) << "[Gateway][RateLimiterManager]"
 
 namespace bcos
 {
 namespace gateway
 {
+constexpr uint64_t MAX_MESSAGE_LENGTH = 32 * 1024 * 1024;  ///< The maximum length of data is 100M.
 enum GroupType : uint16_t
 {
     // group with at-least one consensus node
@@ -43,13 +42,5 @@ enum GroupType : uint16_t
     OUTSIDE_GROUP = 0x2,
 };
 
-template <typename T, typename S, typename... Args>
-std::pair<std::shared_ptr<T>, S> createServiceClient(
-    std::string const& _serviceName, std::string const& _servantName, const Args&... _args)
-{
-    auto servantName = bcos::protocol::getPrxDesc(_serviceName, _servantName);
-    auto prx = Application::getCommunicator()->stringToProxy<S>(servantName);
-    return std::make_pair(std::make_shared<T>(prx, _args...), prx);
-}
 }  // namespace gateway
 }  // namespace bcos

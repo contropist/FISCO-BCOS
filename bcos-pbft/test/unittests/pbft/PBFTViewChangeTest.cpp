@@ -18,6 +18,9 @@
  * @author: yujiechen
  * @date 2021-06-01
  */
+#include "bcos-framework/bcos-framework/testutils/faker/FakeBlock.h"
+#include "bcos-framework/bcos-framework/testutils/faker/FakeBlockHeader.h"
+
 #include "test/unittests/pbft/PBFTFixture.h"
 #include "test/unittests/protocol/FakePBFTMessage.h"
 #include <bcos-crypto/hash/Keccak256.h>
@@ -76,11 +79,11 @@ BOOST_AUTO_TEST_CASE(testViewChangeWithPrecommitProposals)
     auto blockHeader = block->blockHeader();
     // the leader submit proposal
     leaderFaker->pbftEngine()->asyncSubmitProposal(
-        false, ref(*blockData), blockHeader->number(), blockHeader->hash(), nullptr);
+        false, *block, blockHeader->number(), blockHeader->hash(), nullptr);
     // the future leader submit the proposal
     auto futureBlockHeader = futureBlock->blockHeader();
-    futureLeader->pbftEngine()->asyncSubmitProposal(false, ref(*futureBlockData),
-        futureBlockHeader->number(), futureBlockHeader->hash(), nullptr);
+    futureLeader->pbftEngine()->asyncSubmitProposal(
+        false, *futureBlock, futureBlockHeader->number(), futureBlockHeader->hash(), nullptr);
 
     auto cacheProcessor =
         std::dynamic_pointer_cast<FakeCacheProcessor>(leaderFaker->pbftEngine()->cacheProcessor());
@@ -104,26 +107,27 @@ BOOST_AUTO_TEST_CASE(testViewChangeWithPrecommitProposals)
     {
         otherNode.second->pbftEngine()->executeWorker();
     }
+    std::this_thread::sleep_for(std::chrono::seconds(5));
     // assume five nodes into preCommit
     size_t precommitSize = 5;
     for (size_t i = 0; i < std::min(precommitSize, fakerMap.size()); i++)
     {
         auto faker = fakerMap[i];
-        FakeCacheProcessor::Ptr cacheProcessor =
+        FakeCacheProcessor::Ptr cacheProcessor2 =
             std::dynamic_pointer_cast<FakeCacheProcessor>(faker->pbftEngine()->cacheProcessor());
-        BOOST_CHECK(cacheProcessor->caches().size() == 2);
-        auto cache =
-            std::dynamic_pointer_cast<FakePBFTCache>((cacheProcessor->caches())[expectedProposal]);
-        BOOST_CHECK(cache->prePrepare());
-        BOOST_CHECK(cache->index() == expectedProposal);
-        cache->intoPrecommit();
+        BOOST_CHECK(cacheProcessor2->caches().size() == 2);
+        auto cache2 =
+            std::dynamic_pointer_cast<FakePBFTCache>((cacheProcessor2->caches())[expectedProposal]);
+        BOOST_CHECK(cache2->prePrepare());
+        BOOST_CHECK(cache2->index() == expectedProposal);
+        cache2->intoPrecommit();
 
-        auto futureCache =
-            std::dynamic_pointer_cast<FakePBFTCache>((cacheProcessor->caches())[futureBlockIndex]);
-        BOOST_CHECK(futureCache->prePrepare());
-        BOOST_CHECK(futureCache->index() == futureBlockIndex);
-        BOOST_CHECK(futureCache->prePrepare());
-        futureCache->intoPrecommit();
+        auto futureCache2 =
+            std::dynamic_pointer_cast<FakePBFTCache>((cacheProcessor2->caches())[futureBlockIndex]);
+        BOOST_CHECK(futureCache2->prePrepare());
+        BOOST_CHECK(futureCache2->index() == futureBlockIndex);
+        BOOST_CHECK(futureCache2->prePrepare());
+        futureCache2->intoPrecommit();
     }
 
     for (size_t i = 0; i < fakerMap.size(); i++)
@@ -144,11 +148,11 @@ BOOST_AUTO_TEST_CASE(testViewChangeWithPrecommitProposals)
     for (size_t i = 0; i < fakerMap.size(); i++)
     {
         auto faker = fakerMap[i];
-        BOOST_CHECK(faker->pbftConfig()->view() > 0);
-        BOOST_CHECK(faker->pbftConfig()->toView() == (faker->pbftConfig()->view()));
-        BOOST_CHECK(faker->pbftConfig()->timer()->changeCycle() == 0);
-        BOOST_CHECK(faker->pbftEngine()->isTimeout() == false);
-        BOOST_CHECK(faker->ledger()->blockNumber() == futureBlockIndex);
+        BOOST_CHECK_GT(faker->pbftConfig()->view(), 0);
+        BOOST_CHECK_EQUAL(faker->pbftConfig()->toView(), (faker->pbftConfig()->view()));
+        BOOST_CHECK_EQUAL(faker->pbftConfig()->timer()->changeCycle(), 0);
+        BOOST_CHECK(!faker->pbftEngine()->isTimeout());
+        BOOST_CHECK_EQUAL(faker->ledger()->blockNumber(), futureBlockIndex);
     }
 }
 BOOST_AUTO_TEST_SUITE_END()

@@ -19,7 +19,7 @@ class SocketFace
 public:
     SocketFace() = default;
 
-    virtual ~SocketFace(){};
+    virtual ~SocketFace() = default;
     virtual bool isConnected() const = 0;
     virtual void close() = 0;
     virtual bi::tcp::endpoint remoteEndpoint(
@@ -32,6 +32,7 @@ public:
 
     virtual const NodeIPEndpoint& nodeIPEndpoint() const = 0;
     virtual void setNodeIPEndpoint(NodeIPEndpoint _nodeIPEndpoint) = 0;
+    virtual ba::io_context& ioService() = 0;
 };
 }  // namespace gateway
 }  // namespace bcos

@@ -5,38 +5,55 @@
 
 #pragma once
 
+#include "bcos-gateway/libratelimit/GatewayRateLimiter.h"
 #include <bcos-crypto/interfaces/crypto/KeyFactory.h>
-#include <bcos-framework/interfaces/front/FrontServiceInterface.h>
+#include <bcos-framework/election/LeaderEntryPointInterface.h>
+#include <bcos-framework/front/FrontServiceInterface.h>
+#include <bcos-framework/security/KeyEncryptInterface.h>
 #include <bcos-gateway/Gateway.h>
 #include <bcos-gateway/GatewayConfig.h>
 #include <bcos-gateway/libamop/AMOPImpl.h>
+#include <sw/redis++/redis++.h>
 #include <boost/asio/ssl.hpp>
+#include <utility>
 
-namespace bcos
-{
-namespace gateway
+namespace bcos::gateway
 {
 class GatewayFactory
 {
 public:
     using Ptr = std::shared_ptr<GatewayFactory>;
-    GatewayFactory(std::string const& _chainID, std::string const& _rpcServiceName)
-      : m_chainID(_chainID), m_rpcServiceName(_rpcServiceName)
+    GatewayFactory(std::string const& _chainID, std::string const& _rpcServiceName,
+        bcos::security::KeyEncryptInterface::Ptr _dataEncrypt = nullptr)
+      : m_chainID(_chainID), m_rpcServiceName(_rpcServiceName), m_dataEncrypt(_dataEncrypt)
     {
-        initCert2PubHexHandler();
+        // For compatibility, p2p communication between nodes still uses the old public key analysis
+        // method
         initSSLContextPubHexHandler();
+        // the new old public key analysis method is used for black white list
+        initSSLContextPubHexHandlerWithoutExtInfo();
+        initCert2PubHexHandler();
     }
 
     virtual ~GatewayFactory() = default;
 
+    // init the function calc public key from the ssl context
+    // in this way, the public key will be parsed in front of a string of prefixes: 3082010a02820101
+    // and suffixes: 0203010001 for rsa certificate
+    void initSSLContextPubHexHandler();
+    // init the function calc public key from the ssl context
+    void initSSLContextPubHexHandlerWithoutExtInfo();
     // init the function calc public hex from the cert
     void initCert2PubHexHandler();
-    // init the function calc public key from the ssl context
-    void initSSLContextPubHexHandler();
 
     std::function<bool(X509* cert, std::string& pubHex)> sslContextPubHandler()
     {
         return m_sslContextPubHandler;
+    }
+
+    std::function<bool(X509* cert, std::string& pubHex)> sslContextPubHandlerWithoutExtInfo()
+    {
+        return m_sslContextPubHandlerWithoutExtInfo;
     }
 
     std::function<bool(const std::string& priKey, std::string& pubHex)> certPubHexHandler()
@@ -46,23 +63,63 @@ public:
 
     // build ssl context
     std::shared_ptr<boost::asio::ssl::context> buildSSLContext(
-        const GatewayConfig::CertConfig& _certConfig);
+        bool _server, uint8_t sslMode, const GatewayConfig::CertConfig& _certConfig);
     // build sm ssl context
     std::shared_ptr<boost::asio::ssl::context> buildSSLContext(
-        const GatewayConfig::SMCertConfig& _smCertConfig);
+        bool _server, uint8_t sslMode, const GatewayConfig::SMCertConfig& _smCertConfig);
+
+    //
+    std::shared_ptr<ratelimiter::RateLimiterManager> buildRateLimiterManager(
+        const GatewayConfig::RateLimiterConfig& _rateLimiterConfig,
+        std::shared_ptr<sw::redis::Redis> _redis);
+
+    // build Service
+    std::shared_ptr<Service> buildService(const GatewayConfig::Ptr& _config);
 
     /**
-     * @brief: construct Gateway
-     * @param _configPath: config.ini path
-     * @return void
+     * @brief construct Gateway for air
+     *
+     * @param _configPath
+     * @param _airVersion
+     * @param _entryPoint
+     * @param _gatewayServiceName
+     * @return Gateway::Ptr
      */
-    Gateway::Ptr buildGateway(const std::string& _configPath, bool _airVersion);
+    Gateway::Ptr buildGateway(const std::string& _configPath, bool _airVersion,
+        bcos::election::LeaderEntryPointInterface::Ptr _entryPoint,
+        std::string const& _gatewayServiceName);
+
     /**
-     * @brief: construct Gateway
-     * @param _config: config parameter object
-     * @return void
+     * @brief construct Gateway for pro
+     *
+     * @param _config
+     * @param _airVersion
+     * @param _entryPoint
+     * @param _gatewayServiceName
+     * @return Gateway::Ptr
      */
-    Gateway::Ptr buildGateway(GatewayConfig::Ptr _config, bool _airVersion);
+    Gateway::Ptr buildGateway(GatewayConfig::Ptr _config, bool _airVersion,
+        bcos::election::LeaderEntryPointInterface::Ptr _entryPoint,
+        std::string const& _gatewayServiceName);
+
+    /**
+     * @brief
+     *
+     * @param _rateLimiterConfig
+     * @param _redisConfig
+     * @return std::shared_ptr<ratelimiter::GatewayRateLimiter>
+     */
+    std::shared_ptr<ratelimiter::GatewayRateLimiter> buildGatewayRateLimiter(
+        const GatewayConfig::RateLimiterConfig& _rateLimiterConfig,
+        const GatewayConfig::RedisConfig& _redisConfig);
+
+    /**
+     * @brief
+     *
+     * @param _redisConfig
+     * @return std::shared_ptr<sw::redis::Redis>
+     */
+    std::shared_ptr<sw::redis::Redis> initRedis(const GatewayConfig::RedisConfig& _redisConfig);
 
 protected:
     virtual bcos::amop::AMOPImpl::Ptr buildAMOP(
@@ -72,12 +129,17 @@ protected:
 
 private:
     std::function<bool(X509* cert, std::string& pubHex)> m_sslContextPubHandler;
+    std::function<bool(X509* cert, std::string& pubHex)> m_sslContextPubHandlerWithoutExtInfo;
 
     std::function<bool(const std::string& priKey, std::string& pubHex)> m_certPubHexHandler;
+
+    void initFailOver(std::shared_ptr<Gateway> _gateWay,
+        bcos::election::LeaderEntryPointInterface::Ptr _entryPoint);
 
 private:
     std::string m_chainID;
     std::string m_rpcServiceName;
+
+    bcos::security::KeyEncryptInterface::Ptr m_dataEncrypt{nullptr};
 };
-}  // namespace gateway
-}  // namespace bcos
+}  // namespace bcos::gateway

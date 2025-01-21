@@ -21,18 +21,44 @@
 
 #include "../vm/Precompiled.h"
 #include "../Common.h"
+#include "bcos-crypto/signature/secp256k1/Secp256k1Crypto.h"
+#include "kzgPrecompiled.h"
 #include "wedpr-crypto/WedprBn128.h"
 #include "wedpr-crypto/WedprCrypto.h"
+#include <bcos-utilities/Log.h>
+#include <algorithm>
 
 using namespace std;
 using namespace bcos;
 using namespace bcos::crypto;
 
-namespace bcos
-{
-namespace executor
+namespace bcos::executor
 {
 PrecompiledRegistrar* PrecompiledRegistrar::s_this = nullptr;
+
+bcos::precompiled::Precompiled::Ptr bcos::executor::PrecompiledMap::at(std::string_view _key,
+    uint32_t version, bool isAuth, ledger::Features const& features) const noexcept
+{
+    if (!_key.starts_with(precompiled::SYS_ADDRESS_PREFIX) && !_key.starts_with(tool::FS_SYS_BIN))
+    {
+        return nullptr;
+    }
+    auto it = m_map.find(std::string(_key));
+    if (it == m_map.end())
+    {
+        return nullptr;
+    }
+    if (it->second.availableFunc(version, isAuth, features))
+    {
+        return it->second.precompiled;
+    }
+    return nullptr;
+}
+bool bcos::executor::PrecompiledMap::contains(std::string const& key, uint32_t version, bool isAuth,
+    ledger::Features const& features) const noexcept
+{
+    return at(key, version, isAuth, features) != nullptr;
+}
 
 PrecompiledExecutor const& PrecompiledRegistrar::executor(std::string const& _name)
 {
@@ -48,8 +74,7 @@ PrecompiledPricer const& PrecompiledRegistrar::pricer(std::string const& _name)
     return get()->m_pricers[_name];
 }
 
-}  // namespace executor
-}  // namespace bcos
+}  // namespace bcos::executor
 
 namespace
 {
@@ -260,6 +285,53 @@ ETH_REGISTER_PRECOMPILED_PRICER(blake2_compression)
     return rounds;
 }
 
+// The precompiled contract for point evaluation, EIP-4844:
+// https://eips.ethereum.org/EIPS/eip-4844#point-evaluation-precompile
+ETH_REGISTER_PRECOMPILED(point_evaluation)(bytesConstRef _in)
+{
+    static constexpr size_t versioned_hash_size = 32;
+    static constexpr size_t z_end_bound = 64;
+    static constexpr size_t y_end_bound = 96;
+    static constexpr size_t commitment_end_bound = 144;
+    static constexpr size_t proof_end_bound = 192;
+
+    if (_in.size() != 192)
+        return {false, {}};
+
+    auto const versioned_hash = _in.getCroppedData(0, versioned_hash_size);
+    auto const z = _in.getCroppedData(versioned_hash_size, z_end_bound - versioned_hash_size);
+    auto const y = _in.getCroppedData(z_end_bound, y_end_bound - z_end_bound);
+    auto const commitment = _in.getCroppedData(y_end_bound, commitment_end_bound - y_end_bound);
+    auto const proof =
+        _in.getCroppedData(commitment_end_bound, proof_end_bound - commitment_end_bound);
+
+    auto kzg = make_shared<bcos::executor::crypto::kzgPrecompiled>();
+
+    if (kzg->kzg2VersionedHash(commitment) != h256(versioned_hash))
+    {
+        BCOS_LOG(ERROR) << LOG_DESC("versioned_hash not equal");
+        return {false, {}};
+    }
+
+    if (!kzg->verifyKZGProof(commitment, z, y, proof))
+    {
+        BCOS_LOG(ERROR) << LOG_DESC("verifyKZGProof failed");
+        return {false, {}};
+    }
+
+    // Return FIELD_ELEMENTS_PER_BLOB and BLS_MODULUS as padded 32 byte big endian values
+    // return turn and Bytes(U256(FIELD_ELEMENTS_PER_BLOB).to_be_bytes32() +
+    // U256(BLS_MODULUS).to_be_bytes32()) refer to
+    // https://github.com/erigontech/silkworm/blob/85ba5171e88855a6702602d38f102aae9b896f9c/silkworm/core/execution/precompile.cpp#L502-L524
+    return {true,
+        *bcos::fromHexString("000000000000000000000000000000000000000000000000000000000000100073eda"
+                             "753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001")};
+}
+
+ETH_REGISTER_PRECOMPILED_PRICER(point_evaluation)(bytesConstRef _in)
+{
+    return 50000;
+}
 
 }  // namespace
 
@@ -267,12 +339,6 @@ namespace bcos
 {
 namespace precompiled
 {
-std::optional<storage::Table> Precompiled::createTable(storage::StateStorage::Ptr _tableFactory,
-    const std::string& tableName, const std::string& valueField)
-{
-    auto ret = _tableFactory->createTable(tableName, valueField);
-    return ret ? _tableFactory->openTable(tableName) : nullopt;
-}
 }  // namespace precompiled
 
 
@@ -283,9 +349,10 @@ h256 sha256(bytesConstRef _in) noexcept
 {
     h256 ret;
     CInputBuffer in{(const char*)_in.data(), _in.size()};
-    COutputBuffer result{(char*)ret.data(), h256::size};
-    if (wedpr_sha256_hash(&in, &result) != 0)
-    {  // TODO: add some log
+    COutputBuffer result{(char*)ret.data(), h256::SIZE};
+    if (wedpr_sha256_hash(&in, &result) != 0) [[unlikely]]
+    {
+        BCOS_LOG(TRACE) << LOG_BADGE("Precompiled") << LOG_DESC("sha256 failed.") << _in.toString();
         return ret;
     }
     return ret;
@@ -295,9 +362,11 @@ h160 ripemd160(bytesConstRef _in)
 {
     h160 ret;
     CInputBuffer in{(const char*)_in.data(), _in.size()};
-    COutputBuffer result{(char*)ret.data(), h160::size};
-    if (wedpr_ripemd160_hash(&in, &result) != 0)
-    {  // TODO: add some log
+    COutputBuffer result{(char*)ret.data(), h160::SIZE};
+    if (wedpr_ripemd160_hash(&in, &result) != 0) [[unlikely]]
+    {
+        BCOS_LOG(TRACE) << LOG_BADGE("Precompiled") << LOG_DESC("ripemd160 failed.")
+                        << _in.toString();
         return ret;
     }
     return ret;
@@ -321,6 +390,7 @@ struct blake2b_state
     size_t outlen;
     uint8_t last_node;
 };
+
 
 // clang-format off
 constexpr uint64_t blake2b_IV[8] =
@@ -448,30 +518,53 @@ bytes blake2FCompression(uint32_t _rounds, bytesConstRef _stateVector, bytesCons
 const int RSV_LENGTH = 65;
 const int PUBLIC_KEY_LENGTH = 64;
 pair<bool, bytes> ecRecover(bytesConstRef _in)
-{  // _in is hash(32),v(32),r(32),s(32), return address
-    byte rawRSV[RSV_LENGTH];
-    memcpy(rawRSV, _in.data() + 64, RSV_LENGTH - 1);
-    rawRSV[RSV_LENGTH - 1] = (byte)((int)_in[63] - 27);
-    CInputBuffer msgHash{(const char*)_in.data(), crypto::HashType::size};
-    CInputBuffer rsv{(const char*)rawRSV, RSV_LENGTH};
-
-    pair<bool, bytes> ret{true, bytes(crypto::HashType::size, 0)};
-    bytes publicKeyBytes(64, 0);
-    COutputBuffer publicKey{(char*)publicKeyBytes.data(), PUBLIC_KEY_LENGTH};
-    auto retCode = wedpr_secp256k1_recover_public_key(&msgHash, &rsv, &publicKey);
-    if (retCode != 0)
+{                                // _in is hash(32),v(32),r(32),s(32), return address
+    if (_in.size() <= 128 - 32)  // must has hash(32),v(32),r(32),s(32)
     {
+        BCOS_LOG(TRACE) << LOG_BADGE("Precompiled")
+                        << LOG_DESC("ecRecover: must has hash(32),v(32),r(32),s(32)");
         return {true, {}};
     }
+
+    BCOS_LOG(TRACE) << LOG_BADGE("Precompiled") << LOG_DESC("ecRecover: ") << _in.size();
+    byte rawRSV[RSV_LENGTH] = {0};
+    memcpy(rawRSV, _in.data() + 64, std::min(_in.size() - 64, (size_t)(RSV_LENGTH - 1)));
+    rawRSV[RSV_LENGTH - 1] = (byte)((int)_in[63] - 27);
+    crypto::HashType mHash;
+    memcpy(mHash.data(), _in.data(), crypto::HashType::SIZE);
+
+    PublicPtr pk;
+    try
+    {
+        pk = crypto::secp256k1Recover(mHash, bytesConstRef(rawRSV, RSV_LENGTH));
+    }
+    catch (...)
+    {
+        // is also ok and return 0x0000000000000000000000000000000000000084
+        return {true, {}};
+    }
+
+    pair<bool, bytes> ret{true, bytes(crypto::HashType::SIZE, 0)};
+    BCOS_LOG(TRACE) << LOG_BADGE("Precompiled") << LOG_DESC("wedpr_secp256k1_recover_public_key")
+                    << LOG_KV("hash", toHexStringWithPrefix(mHash))
+                    << LOG_KV("rsv", *toHexString(rawRSV, rawRSV + RSV_LENGTH));
+    if (pk == nullptr)
+    {
+        BCOS_LOG(TRACE) << LOG_BADGE("Precompiled") << LOG_DESC("ecRecover publicKey failed");
+        return {true, {}};
+    }
+    BCOS_LOG(TRACE) << LOG_BADGE("Precompiled")
+                    << LOG_DESC("wedpr_secp256k1_recover_public_key success");
     // keccak256 and set first 12 byte to zero
-    CInputBuffer pubkeyBuffer{(const char*)publicKeyBytes.data(), PUBLIC_KEY_LENGTH};
-    COutputBuffer pubkeyHash{(char*)ret.second.data(), crypto::HashType::size};
-    retCode = wedpr_keccak256_hash(&pubkeyBuffer, &pubkeyHash);
+    CInputBuffer pubkeyBuffer{pk->constData(), PUBLIC_KEY_LENGTH};
+    COutputBuffer pubkeyHash{(char*)ret.second.data(), crypto::HashType::SIZE};
+    auto retCode = wedpr_keccak256_hash(&pubkeyBuffer, &pubkeyHash);
     if (retCode != 0)
     {
         return {true, {}};
     }
     memset(ret.second.data(), 0, 12);
+    BCOS_LOG(TRACE) << LOG_BADGE("Precompiled") << LOG_DESC("ecRecover success");
     return ret;
 }
 

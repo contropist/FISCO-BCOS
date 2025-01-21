@@ -53,6 +53,12 @@ deps/**
 # log
 *.log
 
+# python
+*.pyc
+
+# vcpkg
+vcpkg
+
 # clangd file
 compile_commands.json
 .cache
@@ -62,3 +68,6 @@ tools/BcosAirBuilder/nodes**
 tools/BcosProBuilder/generated**
 tools/BcosAirBuilder/*
 *.log
+
+test/*
+/CMakeSettings.json

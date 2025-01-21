@@ -19,16 +19,21 @@
  */
 #include "bcos-codec/abi/ContractABICodec.h"
 #include "bcos-codec/abi/ContractABIType.h"
+#include "bcos-codec/wrapper/CodecWrapper.h"
+#include "bcos-utilities/Common.h"
 #include <bcos-crypto/hash/Keccak256.h>
 #include <bcos-crypto/hash/SM3.h>
 #include <bcos-utilities/testutils/TestPromptFixture.h>
+#include <boost/algorithm/hex.hpp>
 #include <boost/test/unit_test.hpp>
+#include <iterator>
 
 using namespace std;
 using namespace bcos;
 using namespace bcos::codec::abi;
 using namespace bcos::codec;
 using namespace bcos::crypto;
+
 namespace bcos
 {
 namespace test
@@ -38,7 +43,7 @@ BOOST_FIXTURE_TEST_SUITE(ABITest, TestPromptFixture)
 BOOST_AUTO_TEST_CASE(ContractABIType_func0)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     u256 a("0x123");
     std::vector<u256> b;
     u256 u0("0x456");
@@ -78,7 +83,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_func0)
 BOOST_AUTO_TEST_CASE(ContractABIType_func1)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     std::string a("dave");
     bool b(true);
     std::vector<u256> c{1, 2, 3};
@@ -109,7 +114,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_func1)
 BOOST_AUTO_TEST_CASE(ContractABIType_func2)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     std::string a("daslfjaklfdaskl");
     u256 b = 1111;
     std::array<u256, 6> c{1, 2, 3, 4, 5, 6};
@@ -141,7 +146,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_func2)
 BOOST_AUTO_TEST_CASE(ContractABIType_func3)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     std::string a("aaafadsfsfadsfdasf");
     Address b("0x35ef07393b57464e93deb59175ff72e6499450cf");
     u256 c = 11111;
@@ -175,7 +180,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_func3)
 BOOST_AUTO_TEST_CASE(ContractABIType_func4)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     std::string a;
     u256 b;
     s256 c;
@@ -206,7 +211,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_func4)
 BOOST_AUTO_TEST_CASE(ContractABIType_u256)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     u256 x = 0;
     std::string r = *toHexString(ct.serialise(x));
@@ -228,7 +233,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_u256)
 BOOST_AUTO_TEST_CASE(ContractABIType_s256)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     s256 x = 0;
     std::string r = *toHexString(ct.serialise(x));
@@ -247,10 +252,170 @@ BOOST_AUTO_TEST_CASE(ContractABIType_s256)
     BOOST_CHECK_EQUAL(r, "00000000000000000000000000000000000000000000000000000000000003e8");
 }
 
+BOOST_AUTO_TEST_CASE(ContractABIType_integer)
+{
+    auto hashImpl = std::make_shared<Keccak256>();
+    auto codec = CodecWrapper(hashImpl, false);
+
+    // int8
+    {
+        int8_t i8 = INT8_MAX;
+        auto b = codec.encode(i8);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "000000000000000000000000000000000000000000000000000000000000007f");
+        int8_t ri8;
+        codec.decode(ref(b), ri8);
+        BOOST_CHECK(i8 == ri8);
+
+        i8 = INT8_MIN;
+        b = codec.encode(i8);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff80");
+        codec.decode(ref(b), ri8);
+        BOOST_CHECK(i8 == ri8);
+    }
+
+    // int16
+    {
+        int16_t i16 = INT16_MAX;
+        auto b = codec.encode(i16);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "0000000000000000000000000000000000000000000000000000000000007fff");
+        int16_t ri16;
+        codec.decode(ref(b), ri16);
+        BOOST_CHECK(i16 == ri16);
+
+        i16 = INT16_MIN;
+        b = codec.encode(i16);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8000");
+        codec.decode(ref(b), ri16);
+        BOOST_CHECK(i16 == ri16);
+    }
+
+    // int32
+    {
+        int32_t i32 = INT32_MAX;
+        auto b = codec.encode(i32);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "000000000000000000000000000000000000000000000000000000007fffffff");
+        int32_t ri32;
+        codec.decode(ref(b), ri32);
+        BOOST_CHECK(i32 == ri32);
+
+        i32 = INT32_MIN;
+        b = codec.encode(i32);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffff80000000");
+        codec.decode(ref(b), ri32);
+        BOOST_CHECK(i32 == ri32);
+    }
+
+    // int64
+    {
+        int64_t i64 = INT64_MAX;
+        auto b = codec.encode(i64);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "0000000000000000000000000000000000000000000000007fffffffffffffff");
+        int64_t ri64;
+        codec.decode(ref(b), ri64);
+        BOOST_CHECK(i64 == ri64);
+
+        i64 = INT64_MIN;
+        b = codec.encode(i64);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "ffffffffffffffffffffffffffffffffffffffffffffffff8000000000000000");
+        codec.decode(ref(b), ri64);
+        BOOST_CHECK(i64 == ri64);
+    }
+
+    // uint8
+    {
+        uint8_t u8 = UINT8_MAX;
+        auto b = codec.encode(u8);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "00000000000000000000000000000000000000000000000000000000000000ff");
+        uint8_t ru8;
+        codec.decode(ref(b), ru8);
+        BOOST_CHECK(u8 == ru8);
+
+        u8 = 0;
+        b = codec.encode(u8);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "0000000000000000000000000000000000000000000000000000000000000000");
+        codec.decode(ref(b), ru8);
+        BOOST_CHECK(u8 == ru8);
+    }
+
+    // uint16
+    {
+        uint16_t u16 = UINT16_MAX;
+        auto b = codec.encode(u16);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "000000000000000000000000000000000000000000000000000000000000ffff");
+        uint16_t ru16;
+        codec.decode(ref(b), ru16);
+        BOOST_CHECK(u16 == ru16);
+
+        u16 = 0;
+        b = codec.encode(u16);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "0000000000000000000000000000000000000000000000000000000000000000");
+        codec.decode(ref(b), ru16);
+        BOOST_CHECK(u16 == ru16);
+    }
+
+    // uint32
+    {
+        uint32_t u32 = UINT32_MAX;
+        auto b = codec.encode(u32);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "00000000000000000000000000000000000000000000000000000000ffffffff");
+        uint32_t ru32;
+        codec.decode(ref(b), ru32);
+        BOOST_CHECK(u32 == ru32);
+
+        u32 = 0;
+        b = codec.encode(u32);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "0000000000000000000000000000000000000000000000000000000000000000");
+        codec.decode(ref(b), ru32);
+        BOOST_CHECK(u32 == ru32);
+    }
+
+    // uint64
+    {
+        uint64_t u64 = UINT64_MAX;
+        auto b = codec.encode(u64);
+        std::string r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "000000000000000000000000000000000000000000000000ffffffffffffffff");
+        uint64_t ru64;
+        codec.decode(ref(b), ru64);
+        BOOST_CHECK(u64 == ru64);
+
+        u64 = 0;
+        b = codec.encode(u64);
+        r = *toHexString(b);
+        BOOST_CHECK_EQUAL(r, "0000000000000000000000000000000000000000000000000000000000000000");
+        codec.decode(ref(b), ru64);
+        BOOST_CHECK(u64 == ru64);
+    }
+
+    {
+        std::string s = "test1";
+        std::string_view sv = "test1";
+        auto r1 = codec.encode(s);
+        auto r2 = codec.encode(sv);
+        auto rs1 = toHexStringWithPrefix(r1);
+        auto rs2 = toHexStringWithPrefix(r2);
+        BOOST_CHECK(rs1 == rs2);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(ContractABIType_bool)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     bool x = true;
     std::string r = *toHexString(ct.serialise(x));
@@ -265,7 +430,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_bool)
 BOOST_AUTO_TEST_CASE(ContractABIType_addr)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     Address x;
     std::string r = *toHexString(ct.serialise(x));
@@ -280,7 +445,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_addr)
 BOOST_AUTO_TEST_CASE(ContractABIType_string)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     std::string x("Hello, world!");
     std::string r = *toHexString(ct.serialise(x));
@@ -297,7 +462,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_string)
 BOOST_AUTO_TEST_CASE(ContractABIType_array_uint256)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     std::array<u256, 3> x{1, 2, 3};
     std::string r = *toHexString(ct.serialise(x));
@@ -322,7 +487,7 @@ BOOST_AUTO_TEST_CASE(ContractABIType_array_uint256)
 BOOST_AUTO_TEST_CASE(ContractABITest0)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
 
     u256 a = 12345;
     s256 b = -67890;
@@ -375,7 +540,7 @@ BOOST_AUTO_TEST_CASE(ContractABITest1)
         "00000000000000000000000000000000000000000000";
 
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     auto rb = ct.abiIn("", a, b, c, d, e);
     auto r = *toHexString(rb);
     BOOST_CHECK_EQUAL(r, expect);
@@ -414,7 +579,7 @@ BOOST_AUTO_TEST_CASE(ContractABITest2)
         "0000000000000000000006";
 
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     auto rb = ct.abiIn("", a);
     auto r = *toHexString(rb);
 
@@ -430,7 +595,7 @@ BOOST_AUTO_TEST_CASE(ContractABITest2)
 BOOST_AUTO_TEST_CASE(ContractABITest3)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     u256 a = 123;
     Address b("0x692a70d2e424a56d2c6c27aa97d1a86395877b3a");
     std::string c = "string c";
@@ -632,7 +797,7 @@ BOOST_AUTO_TEST_CASE(ContractABI_AbiOutString0)
     u256 u = 111111111;
     std::string s = "test string";
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     auto in = ct.abiIn("", u, s);
 
     ABIFunc afunc;
@@ -658,7 +823,7 @@ BOOST_AUTO_TEST_CASE(ContractABI_AbiOutString1)
     s256 i = -11111111;
     std::string s = "aaaaaaa";
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec ct(hashImpl);
+    ContractABICodec ct(*hashImpl);
     auto in = ct.abiIn("", s, u, i);
 
     ABIFunc afunc;
@@ -698,7 +863,7 @@ BOOST_AUTO_TEST_CASE(testABIOutBytes)
     BOOST_CHECK(allTypes[2] == "bytes32");
 
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec abi(hashImpl);
+    ContractABICodec abi(*hashImpl);
     auto paramData = abi.abiIn("", toString32(hashData), plainBytes, toString32(hashData));
     string32 decodedParam1;
     bytes decodedParam2;
@@ -724,7 +889,89 @@ BOOST_AUTO_TEST_CASE(testABIOutBytes)
 BOOST_AUTO_TEST_CASE(testABITuple)
 {
     auto hashImpl = std::make_shared<Keccak256>();
-    ContractABICodec abi(hashImpl);
+    ContractABICodec abi(*hashImpl);
+
+    // static tuple(uint32,uint32)
+    {
+        auto staticTuple = std::make_tuple(uint32_t(0), uint32_t(10));
+        auto dynamicTuple = std::make_tuple(uint8_t(0), std::string("990"));
+        auto tupleV = std::vector<decltype(dynamicTuple)>({dynamicTuple});
+
+        auto encodedBytes = abi.abiIn("", tupleV, staticTuple);
+        auto s = toHexStringWithPrefix(encodedBytes);
+        BOOST_CHECK(
+            s ==
+            "0x000000000000000000000000000000000000000000000000000000000000006000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            "000000000000000000000a0000000000000000000000000000000000000000000000000000000000000001"
+            "00000000000000000000000000000000000000000000000000000000000000200000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            "00000000000000000040000000000000000000000000000000000000000000000000000000000000000339"
+            "39300000000000000000000000000000000000000000000000000000000000");
+
+        decltype(tupleV) resultV;
+        decltype(staticTuple) resultStatic;
+        abi.abiOut(ref(encodedBytes), resultV, resultStatic);
+        BOOST_CHECK(resultV.size() == 1);
+        BOOST_CHECK(std::get<0>(resultV.at(0)) == uint8_t(0));
+        BOOST_CHECK(std::get<1>(resultV.at(0)) == std::string("990"));
+        BOOST_CHECK(std::get<0>(resultStatic) == uint32_t(0));
+        BOOST_CHECK(std::get<1>(resultStatic) == uint32_t(10));
+    }
+
+    // static tuple(uint32,uint32,int8)
+    {
+        auto staticTuple = std::make_tuple(uint32_t(0), uint32_t(10), int8_t(-1));
+        auto dynamicTuple1 = std::make_tuple(uint8_t(0), std::string("990"));
+        auto dynamicTuple2 = std::make_tuple(uint8_t(1), std::string("991"));
+        auto tupleV = std::vector<decltype(dynamicTuple1)>({dynamicTuple1, dynamicTuple2});
+
+        auto encodedBytes = abi.abiIn("", tupleV, staticTuple, tupleV);
+        auto s = toHexStringWithPrefix(encodedBytes);
+        BOOST_CHECK(
+            s ==
+            "0x00000000000000000000000000000000000000000000000000000000000000a000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            "000000000000000000000affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            "00000000000000000000000000000000000000000000000000000000000002000000000000000000000000"
+            "00000000000000000000000000000000000000000200000000000000000000000000000000000000000000"
+            "0000000000000000004000000000000000000000000000000000000000000000000000000000000000c000"
+            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+            "00000000000000000000000000000000000000400000000000000000000000000000000000000000000000"
+            "00000000000000000339393000000000000000000000000000000000000000000000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000000000100000000000000000000000000"
+            "00000000000000000000000000000000000040000000000000000000000000000000000000000000000000"
+            "00000000000000033939310000000000000000000000000000000000000000000000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000000020000000000000000000000000000"
+            "00000000000000000000000000000000004000000000000000000000000000000000000000000000000000"
+            "000000000000c0000000000000000000000000000000000000000000000000000000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000040000000000000000000000000000000"
+            "00000000000000000000000000000000033939300000000000000000000000000000000000000000000000"
+            "00000000000000000000000000000000000000000000000000000000000000000000000000010000000000"
+            "00000000000000000000000000000000000000000000000000004000000000000000000000000000000000"
+            "00000000000000000000000000000003393931000000000000000000000000000000000000000000000000"
+            "0000000000");
+
+        decltype(tupleV) resultV1, resultV2;
+        decltype(staticTuple) resultStatic;
+        abi.abiOut(ref(encodedBytes), resultV1, resultStatic, resultV2);
+        BOOST_CHECK(resultV1.size() == 2);
+        BOOST_CHECK(std::get<0>(resultV1.at(0)) == uint8_t(0));
+        BOOST_CHECK(std::get<1>(resultV1.at(0)) == std::string("990"));
+        BOOST_CHECK(std::get<0>(resultV1.at(1)) == uint8_t(1));
+        BOOST_CHECK(std::get<1>(resultV1.at(1)) == std::string("991"));
+
+        BOOST_CHECK(std::get<0>(resultStatic) == uint32_t(0));
+        BOOST_CHECK(std::get<1>(resultStatic) == uint32_t(10));
+        BOOST_CHECK(std::get<2>(resultStatic) == int8_t(-1));
+
+        BOOST_CHECK(resultV2.size() == 2);
+        BOOST_CHECK(std::get<0>(resultV2.at(0)) == uint8_t(0));
+        BOOST_CHECK(std::get<1>(resultV2.at(0)) == std::string("990"));
+        BOOST_CHECK(std::get<0>(resultV2.at(1)) == uint8_t(1));
+        BOOST_CHECK(std::get<1>(resultV2.at(1)) == std::string("991"));
+    }
+
     // tuple(vector(tuple(u256,string,string,u256)))
     {
         auto tuple1 = std::make_tuple(u256(1), std::string("id1"), std::string("test1"), u256(2));
@@ -808,6 +1055,7 @@ BOOST_AUTO_TEST_CASE(testABITuple)
         BOOST_CHECK(std::get<4>(test1)[0] == std::get<4>(test1Decode)[0]);
         BOOST_CHECK(std::get<4>(test1)[1] == std::get<4>(test1Decode)[1]);
     }
+
     // tuple(u256,bool,vector(tuple(string,s256,Address,bytes,vector)),vector(tuple(string,s256,Address,bytes,vector)))
     {
         auto tuple1 = std::make_tuple(std::string("123"), s256(-1),
@@ -869,6 +1117,26 @@ BOOST_AUTO_TEST_CASE(testABITuple)
         BOOST_CHECK(std::get<4>(test1DecodeTupleV2[1])[0] == std::get<4>(tuple1)[0]);
         BOOST_CHECK(std::get<4>(test1DecodeTupleV2[1])[1] == std::get<4>(tuple1)[1]);
     }
+}
+
+BOOST_AUTO_TEST_CASE(wrapper)
+{
+    using namespace std::string_view_literals;
+
+    auto hashImpl = std::make_shared<Keccak256>();
+
+    std::vector<std::string> list{boost::algorithm::unhex("0a"s)};
+    auto hex = boost::algorithm::unhex("1b2c3d1f"s);
+    bcos::bytes buffer(hex.begin(), hex.end());
+
+    codec::abi::ContractABICodec abi(*hashImpl);
+    auto encoded1 = abi.abiIn("", list, buffer);
+
+    bcos::bytesConstRef ref(buffer.data(), hex.size());
+    codec::abi::ContractABICodec abi2(*hashImpl);
+    auto encoded2 = abi2.abiIn("", list, ref);
+
+    BOOST_CHECK_EQUAL(encoded1, encoded2);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

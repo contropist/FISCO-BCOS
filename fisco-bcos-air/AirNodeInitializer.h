@@ -21,28 +21,36 @@
 
 #pragma once
 #include "libinitializer/Initializer.h"
-#include <bcos-framework/interfaces/gateway/GatewayInterface.h>
-#include <bcos-framework/interfaces/rpc/RPCInterface.h>
-namespace bcos
-{
-namespace node
+#include <bcos-framework/gateway/GatewayInterface.h>
+#include <bcos-framework/rpc/RPCInterface.h>
+#include <bcos-rpc/tarsRPC/RPCServer.h>
+#include <bcos-utilities/ObjectAllocatorMonitor.h>
+#include <utility>
+
+namespace bcos::node
 {
 class AirNodeInitializer
 {
 public:
     AirNodeInitializer() = default;
+    AirNodeInitializer(const AirNodeInitializer&) = delete;
+    AirNodeInitializer(AirNodeInitializer&&) = delete;
+    AirNodeInitializer& operator=(const AirNodeInitializer&) = delete;
+    AirNodeInitializer& operator=(AirNodeInitializer&&) = delete;
     virtual ~AirNodeInitializer() { stop(); }
 
     virtual void init(std::string const& _configFilePath, std::string const& _genesisFile);
     virtual void start();
     virtual void stop();
+    virtual bcos::initializer::Initializer::Ptr nodeInitializer() { return m_nodeInitializer; }
 
 protected:
     virtual void initAirNode(std::string const& _configFilePath, std::string const& _genesisFile,
         bcos::gateway::GatewayInterface::Ptr _gateway)
     {
         m_nodeInitializer = std::make_shared<bcos::initializer::Initializer>();
-        m_nodeInitializer->initAirNode(_configFilePath, _genesisFile, _gateway);
+        m_nodeInitializer->initAirNode(
+            _configFilePath, _genesisFile, std::move(_gateway), m_logInitializer->logPath());
     }
 
 private:
@@ -51,6 +59,10 @@ private:
 
     bcos::gateway::GatewayInterface::Ptr m_gateway;
     bcos::rpc::RPCInterface::Ptr m_rpc;
+    bcos::ObjectAllocatorMonitor::Ptr m_objMonitor;
+
+    std::optional<rpc::RPCApplication> m_tarsApplication;
+    std::optional<std::string> m_tarsConfig;
+    std::optional<std::thread> m_tarsThread;
 };
-}  // namespace node
-}  // namespace bcos
+}  // namespace bcos::node

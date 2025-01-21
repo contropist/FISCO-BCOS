@@ -20,30 +20,31 @@
  */
 #pragma once
 #include <bcos-boostssl/websocket/WsService.h>
-#include <bcos-framework/interfaces/gateway/GatewayInterface.h>
-#include <bcos-framework/interfaces/rpc/RPCInterface.h>
-#include <bcos-protocol/amop/AMOPRequest.h>
+#include <bcos-framework/gateway/GatewayInterface.h>
+#include <bcos-framework/protocol/AMOPRequest.h>
+#include <bcos-framework/rpc/RPCInterface.h>
 #include <bcos-utilities/Timer.h>
-#include <tarscpp/servant/Application.h>
+#include <servant/Application.h>
+
+#include <utility>
 
 #define AMOP_CLIENT_LOG(level) BCOS_LOG(level) << LOG_BADGE("AMOPClient")
-namespace bcos
-{
-namespace rpc
+
+namespace bcos::rpc
 {
 class AMOPClient : public std::enable_shared_from_this<AMOPClient>
 {
 public:
     using Ptr = std::shared_ptr<AMOPClient>;
     AMOPClient(std::shared_ptr<boostssl::ws::WsService> _wsService,
-        std::shared_ptr<bcos::boostssl::ws::WsMessageFactory> _wsMessageFactory,
+        std::shared_ptr<bcos::boostssl::MessageFaceFactory> _wsMessageFactory,
         std::shared_ptr<bcos::protocol::AMOPRequestFactory> _requestFactory,
-        bcos::gateway::GatewayInterface::Ptr _gateway, std::string const& _gatewayServiceName)
-      : m_wsService(_wsService),
-        m_wsMessageFactory(_wsMessageFactory),
-        m_requestFactory(_requestFactory),
-        m_gateway(_gateway),
-        m_gatewayServiceName(_gatewayServiceName)
+        bcos::gateway::GatewayInterface::Ptr _gateway, std::string _gatewayServiceName)
+      : m_wsService(std::move(_wsService)),
+        m_wsMessageFactory(std::move(_wsMessageFactory)),
+        m_requestFactory(std::move(_requestFactory)),
+        m_gateway(std::move(_gateway)),
+        m_gatewayServiceName(std::move(_gatewayServiceName))
     {
         initMsgHandler();
         // create gatewayStatusDetector to detect status of gateway periodically
@@ -51,7 +52,7 @@ public:
         m_gatewayStatusDetector->registerTimeoutHandler([this]() { pingGatewayAndNotifyTopics(); });
     }
 
-    virtual ~AMOPClient() {}
+    virtual ~AMOPClient() = default;
     /**
      * @brief receive amop request message from the gateway
      *
@@ -77,7 +78,7 @@ public:
         catch (std::exception const& e)
         {
             BCOS_LOG(WARNING) << LOG_DESC("asyncNotifyAMOPMessage exception")
-                              << LOG_KV("error", boost::diagnostic_information(e));
+                              << LOG_KV("message", boost::diagnostic_information(e));
         }
     }
 
@@ -89,7 +90,7 @@ public:
         if (m_gatewayStatusDetector)
         {
             auto activeEndPoints = getActiveGatewayEndPoints();
-            if (activeEndPoints.size() == 0)
+            if (activeEndPoints.empty())
             {
                 m_gatewayActivated.store(false);
             }
@@ -111,17 +112,17 @@ public:
 
 protected:
     /// for AMOP requests from SDK
-    virtual void onRecvSubTopics(std::shared_ptr<boostssl::ws::WsMessage> _msg,
+    virtual void onRecvSubTopics(std::shared_ptr<boostssl::MessageFace> _msg,
         std::shared_ptr<boostssl::ws::WsSession> _session);
     /**
      * @brief: receive amop request message from sdk
      */
-    virtual void onRecvAMOPRequest(std::shared_ptr<boostssl::ws::WsMessage> _msg,
+    virtual void onRecvAMOPRequest(std::shared_ptr<boostssl::MessageFace> _msg,
         std::shared_ptr<boostssl::ws::WsSession> _session);
     /**
      * @brief: receive amop broadcast message from sdk
      */
-    virtual void onRecvAMOPBroadcast(std::shared_ptr<boostssl::ws::WsMessage> _msg,
+    virtual void onRecvAMOPBroadcast(std::shared_ptr<boostssl::MessageFace> _msg,
         std::shared_ptr<boostssl::ws::WsSession> _session);
 
     std::shared_ptr<boostssl::ws::WsSession> randomChooseSession(std::string const& _topic);
@@ -151,34 +152,29 @@ protected:
 
     virtual void subscribeTopicToAllNodes();
     virtual void removeTopicFromAllNodes(std::vector<std::string> const& _topicName);
-    std::string endPointToString(std::string const& _serviceName, TC_Endpoint const& _endPoint)
-    {
-        return _serviceName + "@tcp -h " + _endPoint.getHost() + " -p " +
-               boost::lexical_cast<std::string>(_endPoint.getPort());
-    }
 
     virtual void initMsgHandler();
 
     void sendMessageToClient(std::string const& _topic,
         std::shared_ptr<boostssl::ws::WsSession> _selectSession,
-        std::shared_ptr<boostssl::ws::WsMessage> _msg,
+        std::shared_ptr<boostssl::MessageFace> _msg,
         std::function<void(bcos::Error::Ptr&&, bytesPointer)> _callback);
 
     bool trySendAMOPRequestToLocalNode(std::shared_ptr<boostssl::ws::WsSession> _session,
-        std::string const& _topic, std::shared_ptr<boostssl::ws::WsMessage> _msg);
+        std::string const& _topic, std::shared_ptr<boostssl::MessageFace> _msg);
 
     void broadcastAMOPMessage(
-        std::string const& _topic, std::shared_ptr<boostssl::ws::WsMessage> _msg);
+        std::string const& _topic, std::shared_ptr<boostssl::MessageFace> _msg);
 
     virtual void pingGatewayAndNotifyTopics();
 
-    virtual bool onGatewayInactivated(std::shared_ptr<boostssl::ws::WsMessage> _msg,
+    virtual bool onGatewayInactivated(std::shared_ptr<boostssl::MessageFace> _msg,
         std::shared_ptr<boostssl::ws::WsSession> _session);
     std::string generateTopicInfo();
 
 protected:
     std::shared_ptr<boostssl::ws::WsService> m_wsService;
-    std::shared_ptr<bcos::boostssl::ws::WsMessageFactory> m_wsMessageFactory;
+    std::shared_ptr<bcos::boostssl::MessageFaceFactory> m_wsMessageFactory;
     std::shared_ptr<bcos::protocol::AMOPRequestFactory> m_requestFactory;
 
     bcos::gateway::GatewayInterface::Ptr m_gateway;
@@ -194,5 +190,4 @@ protected:
     std::atomic_bool m_gatewayActivated = {true};
     std::atomic_bool m_notifyTopicSuccess = {true};
 };
-}  // namespace rpc
-}  // namespace bcos
+}  // namespace bcos::rpc

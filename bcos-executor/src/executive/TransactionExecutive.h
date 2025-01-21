@@ -23,17 +23,18 @@
 
 #include "../Common.h"
 #include "../executor/TransactionExecutor.h"
-#include "../precompiled/PrecompiledResult.h"
+#include "../vm/VMFactory.h"
 #include "BlockContext.h"
 #include "SyncStorageWrapper.h"
-#include "bcos-framework/interfaces/executor/ExecutionMessage.h"
-#include "bcos-framework/interfaces/protocol/BlockHeader.h"
-#include "bcos-framework/interfaces/protocol/Transaction.h"
+#include "bcos-executor/src/precompiled/common/PrecompiledResult.h"
+#include "bcos-framework/executor/ExecutionMessage.h"
+#include "bcos-framework/executor/PrecompiledTypeDef.h"
+#include "bcos-framework/protocol/BlockHeader.h"
+#include "bcos-framework/protocol/Transaction.h"
 #include "bcos-protocol/TransactionStatus.h"
+#include "bcos-table/src/StateStorage.h"
 #include <bcos-codec/abi/ContractABICodec.h>
 #include <boost/algorithm/string/case_conv.hpp>
-#include <boost/coroutine2/all.hpp>
-#include <boost/coroutine2/coroutine.hpp>
 #include <functional>
 #include <variant>
 
@@ -52,43 +53,27 @@ struct PrecompiledExecResult;
 namespace executor
 {
 class HostContext;
+class BlockContext;
 
 class TransactionExecutive : public std::enable_shared_from_this<TransactionExecutive>
 {
 public:
     using Ptr = std::shared_ptr<TransactionExecutive>;
-
-    class ResumeHandler;
-
-    using CoroutineMessage = std::function<void(ResumeHandler resume)>;
-    using Coroutine = boost::coroutines2::coroutine<CoroutineMessage>;
-
-    class ResumeHandler
-    {
-    public:
-        ResumeHandler(TransactionExecutive& executive) : m_executive(executive) {}
-
-        void operator()()
-        {
-            COROUTINE_TRACE_LOG(TRACE, m_executive.contextID(), m_executive.seq())
-                << "Context switch to executive coroutine, from ResumeHandler";
-            (*m_executive.m_pullMessage)();
-        }
-
-    private:
-        TransactionExecutive& m_executive;
-    };
-
-    TransactionExecutive(std::weak_ptr<BlockContext> blockContext, std::string contractAddress,
-        int64_t contextID, int64_t seq, std::shared_ptr<wasm::GasInjector>& gasInjector)
-      : m_blockContext(std::move(blockContext)),
+    TransactionExecutive(const BlockContext& blockContext, std::string contractAddress,
+        int64_t contextID, int64_t seq, const wasm::GasInjector& gasInjector)
+      : m_blockContext(blockContext),
         m_contractAddress(std::move(contractAddress)),
         m_contextID(contextID),
         m_seq(seq),
-        m_gasInjector(gasInjector)
+        m_gasInjector(gasInjector),
+        m_recoder(std::make_shared<storage::Recoder>()),
+        m_transientRecoder(std::make_shared<storage::Recoder>()),
+        m_storageWrapperObj(m_blockContext.storage(), m_recoder),
+        m_storageWrapper(&m_storageWrapperObj)
     {
-        m_recoder = m_blockContext.lock()->storage()->newRecoder();
-        m_hashImpl = m_blockContext.lock()->hashHandler();
+        m_hashImpl = m_blockContext.hashHandler();
+        m_storageWrapperObj.setCodeCache(m_blockContext.getCodeCache());
+        m_storageWrapperObj.setCodeHashCache(m_blockContext.getCodeHashCache());
     }
 
     TransactionExecutive(TransactionExecutive const&) = delete;
@@ -98,15 +83,10 @@ public:
 
     virtual ~TransactionExecutive() = default;
 
-    CallParameters::UniquePtr start(CallParameters::UniquePtr input);  // start a new coroutine to
-                                                                       // execute
+    virtual CallParameters::UniquePtr start(CallParameters::UniquePtr input);
 
     // External call request
-    CallParameters::UniquePtr externalCall(CallParameters::UniquePtr input);  // call by
-                                                                              // hostContext
-
-    // External request key locks, throw exception if dead lock detected
-    void externalAcquireKeyLocks(std::string acquireKeyLock);
+    virtual CallParameters::UniquePtr externalCall(CallParameters::UniquePtr input);
 
     auto& storage()
     {
@@ -114,77 +94,109 @@ public:
         return *m_storageWrapper;
     }
 
-    std::shared_ptr<SyncStorageWrapper> lastStorage() { return m_lastStorageWrapper; }
 
-    std::weak_ptr<BlockContext> blockContext() { return m_blockContext; }
+    const BlockContext& blockContext() { return m_blockContext; }
 
     int64_t contextID() const { return m_contextID; }
     int64_t seq() const { return m_seq; }
 
-    std::string_view contractAddress() { return m_contractAddress; }
+    // in delegatecall this is codeAddress
+    std::string_view contractAddress() const { return m_contractAddress; }
 
     CallParameters::UniquePtr execute(
         CallParameters::UniquePtr callParameters);  // execute parameters in
                                                     // current corouitine
 
-    bool isPrecompiled(const std::string& _address) const;
+    virtual bool isPrecompiled(const std::string& _address) const;
 
-    std::shared_ptr<precompiled::Precompiled> getPrecompiled(const std::string& _address) const;
+    std::shared_ptr<precompiled::Precompiled> getPrecompiled(std::string_view _address) const;
+    virtual std::shared_ptr<precompiled::Precompiled> getPrecompiled(std::string_view _address,
+        uint32_t version, bool isAuth, const ledger::Features& features) const;
 
-    void setConstantPrecompiled(
-        const std::string& _address, std::shared_ptr<precompiled::Precompiled> precompiled);
-
-    void setBuiltInPrecompiled(std::shared_ptr<const std::set<std::string>> _builtInPrecompiled)
+    void setStaticPrecompiled(std::shared_ptr<const std::set<std::string>> _staticPrecompiled)
     {
-        m_builtInPrecompiled = std::move(_builtInPrecompiled);
+        m_staticPrecompiled = std::move(_staticPrecompiled);
     }
 
-    bool isBuiltInPrecompiled(const std::string& _a) const;
+    inline bool isStaticPrecompiled(const std::string& _a) const
+    {
+        return _a.starts_with(precompiled::SYS_ADDRESS_PREFIX) && m_staticPrecompiled->contains(_a);
+    }
 
-    bool isEthereumPrecompiled(const std::string& _a) const;
+    inline bool isEthereumPrecompiled(const std::string& _a) const
+    {
+        return m_evmPrecompiled != nullptr && _a.starts_with(precompiled::EVM_PRECOMPILED_PREFIX) &&
+               m_evmPrecompiled->contains(_a);
+    }
 
     std::pair<bool, bytes> executeOriginPrecompiled(const std::string& _a, bytesConstRef _in) const;
 
     int64_t costOfPrecompiled(const std::string& _a, bytesConstRef _in) const;
 
     void setEVMPrecompiled(
-        std::shared_ptr<const std::map<std::string, std::shared_ptr<PrecompiledContract>>>
-            precompiledContract);
+        std::shared_ptr<std::map<std::string, std::shared_ptr<PrecompiledContract>>>);
 
-    void setConstantPrecompiled(
-        std::shared_ptr<std::map<std::string, std::shared_ptr<precompiled::Precompiled>>>
-            _constantPrecompiled);
+    void setPrecompiled(std::shared_ptr<PrecompiledMap>);
 
-    std::shared_ptr<precompiled::PrecompiledExecResult> execPrecompiled(const std::string& address,
-        bytesConstRef param, const std::string& origin, const std::string& sender, int64_t gasLeft);
+    std::shared_ptr<precompiled::PrecompiledExecResult> execPrecompiled(
+        precompiled::PrecompiledExecResult::Ptr const& _precompiledParams);
 
-    void setExchangeMessage(CallParameters::UniquePtr callParameters)
-    {
-        m_exchangeMessage = std::move(callParameters);
-    }
+    using tssMap = bcos::BucketMap<int64_t, std::shared_ptr<storage::StateStorageInterface>>;
 
-    CallParameters::UniquePtr resume()
-    {
-        EXECUTOR_LOG(TRACE) << "Context switch to executive coroutine, from resume";
-        (*m_pullMessage)();
+    VMSchedule const& vmSchedule() const { return m_blockContext.vmSchedule(); }
 
-        return dispatcher();
-    }
-    VMSchedule const& vmSchedule() const { return m_blockContext.lock()->vmSchedule(); }
+    bool isWasm() const { return m_blockContext.isWasm(); }
 
-private:
-    CallParameters::UniquePtr dispatcher();
+    bool hasContractTableChanged() const { return m_hasContractTableChanged; }
+    void setContractTableChanged() { m_hasContractTableChanged = true; }
 
+    bool checkAuth(const CallParameters::UniquePtr& callParameters);
+    void creatAuthTable(std::string_view _tableName, std::string_view _origin,
+        std::string_view _sender, uint32_t _version);
+
+    crypto::HashType getCodeHash(const std::string_view& contractTableName);
+    std::optional<storage::Entry> getCodeEntryFromContractTable(
+        const std::string_view contractTableName);
+    std::optional<storage::Entry> getCodeByHash(const std::string_view& codeHash);
+    bool setCode(std::string_view contractTableName,
+        std::variant<std::string_view, std::string, bcos::bytes> code);
+    void setAbiByCodeHash(std::string_view codeHash, std::string_view abi);
+    std::tuple<h256, std::optional<storage::Entry>> getCodeByContractTableName(
+        const std::string_view& contractTableName, bool needTryFromContractTable = true);
+
+    CallParameters::UniquePtr transferBalance(CallParameters::UniquePtr callParameters,
+        int64_t requireGas, std::string_view currentContextAddress);
+
+    std::string getContractTableName(
+        const std::string_view& _address, bool isWasm = false, bool isCreate = false);
+
+    std::shared_ptr<storage::StateStorageInterface> getTransientStateStorage(int64_t contextID);
+
+    std::shared_ptr<storage::Recoder> getRecoder() { return m_recoder; }
+
+protected:
     std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> call(
         CallParameters::UniquePtr callParameters);
-    std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> callPrecompiled(
-        CallParameters::UniquePtr callParameters);
+    CallParameters::UniquePtr callPrecompiled(CallParameters::UniquePtr callParameters);
     std::tuple<std::unique_ptr<HostContext>, CallParameters::UniquePtr> create(
         CallParameters::UniquePtr callParameters);
+    CallParameters::UniquePtr internalCreate(CallParameters::UniquePtr callParameters);
     CallParameters::UniquePtr go(
         HostContext& hostContext, CallParameters::UniquePtr extraData = nullptr);
+    CallParameters::UniquePtr callDynamicPrecompiled(
+        CallParameters::UniquePtr callParameters, const std::string& code);
 
-    void spawnAndCall(std::function<void(ResumeHandler)> function);
+    //    virtual TransactionExecutive::Ptr buildChildExecutive(const std::string& _contractAddress,
+    //        int64_t contextID, int64_t seq, bool useCoroutine = true)
+    virtual TransactionExecutive::Ptr buildChildExecutive(
+        const std::string& _contractAddress, int64_t contextID, int64_t seq)
+    {
+        auto executiveFactory = std::make_shared<ExecutiveFactory>(
+            m_blockContext, m_evmPrecompiled, m_precompiled, m_staticPrecompiled, m_gasInjector);
+
+
+        return executiveFactory->build(_contractAddress, contextID, seq, ExecutiveType::common);
+    }
 
     void revert();
 
@@ -193,64 +205,37 @@ private:
 
     void writeErrInfoToOutput(std::string const& errInfo, CallParameters& _callParameters)
     {
-        bcos::codec::abi::ContractABICodec abi(m_hashImpl);
+        bcos::codec::abi::ContractABICodec abi(*m_hashImpl);
         auto codecOutput = abi.abiIn("Error(string)", errInfo);
         _callParameters.data = std::move(codecOutput);
     }
 
-    inline std::string getContractTableName(const std::string_view& _address, bool isWasm = false)
-    {
-        auto blockContext = m_blockContext.lock();
-        std::string formatAddress(_address);
-        if (!isWasm)
-        {
-            // evm address needs to be lower
-            boost::algorithm::to_lower(formatAddress);
-        }
+    bool checkExecAuth(const CallParameters::UniquePtr& callParameters);
+    int32_t checkContractAvailable(const CallParameters::UniquePtr& callParameters);
+    uint8_t checkAccountAvailable(const CallParameters::UniquePtr& callParameters);
 
-        std::string address = (_address[0] == '/') ? formatAddress.substr(1) : formatAddress;
+    bool buildBfsPath(std::string_view _absoluteDir, std::string_view _origin,
+        std::string_view _sender, std::string_view _type, int64_t gasLeft);
 
-        if (blockContext->isAuthCheck())
-        {
-            std::stringstream prefix;
-            prefix << std::setfill('0') << std::setw(36) << 1;
-            if (_address.find(prefix.str()) == 0)
-            {
-                return std::string("/sys/").append(address);
-            }
-        }
-        return std::string("/apps/").append(address);
-    }
-
-    bool checkAuth(const CallParameters::UniquePtr& callParameters, bool _isCreate);
-
-    void creatAuthTable(
-        std::string_view _tableName, std::string_view _origin, std::string_view _sender);
-
-    bool buildBfsPath(std::string const& _absoluteDir, const std::string& _origin,
-        const std::string& _sender, int64_t gasLeft);
-
-    std::weak_ptr<BlockContext> m_blockContext;  ///< Information on the runtime environment.
-    std::shared_ptr<std::map<std::string, std::shared_ptr<precompiled::Precompiled>>>
-        m_constantPrecompiled;
-    std::shared_ptr<const std::map<std::string, std::shared_ptr<PrecompiledContract>>>
-        m_evmPrecompiled;
-    std::shared_ptr<const std::set<std::string>> m_builtInPrecompiled;
+    const BlockContext& m_blockContext;  ///< Information on the runtime environment.
+    std::shared_ptr<std::map<std::string, std::shared_ptr<PrecompiledContract>>> m_evmPrecompiled;
+    std::shared_ptr<PrecompiledMap> m_precompiled;
+    std::shared_ptr<const std::set<std::string>> m_staticPrecompiled;
 
     std::string m_contractAddress;
     int64_t m_contextID;
     int64_t m_seq;
     crypto::Hash::Ptr m_hashImpl;
 
-    std::shared_ptr<wasm::GasInjector> m_gasInjector = nullptr;
+    const wasm::GasInjector& m_gasInjector;
 
     bcos::storage::Recoder::Ptr m_recoder;
-    std::unique_ptr<SyncStorageWrapper> m_storageWrapper;
-    std::shared_ptr<SyncStorageWrapper> m_lastStorageWrapper;
-    CallParameters::UniquePtr m_exchangeMessage = nullptr;
+    bcos::storage::Recoder::Ptr m_transientRecoder;
+    std::vector<TransactionExecutive::Ptr> m_childExecutives;
 
-    std::optional<Coroutine::pull_type> m_pullMessage;
-    std::optional<Coroutine::push_type> m_pushMessage;
+    storage::StorageWrapper m_storageWrapperObj;
+    storage::StorageWrapper* m_storageWrapper;
+    bool m_hasContractTableChanged = false;
 };
 
 }  // namespace executor

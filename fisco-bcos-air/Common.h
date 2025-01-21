@@ -19,35 +19,37 @@
  */
 
 #pragma once
-#include <atomic>
-#include <chrono>
+#include "bcos-utilities/Common.h"
 #include <ctime>
 #include <iostream>
-#include <memory>
 
-namespace bcos
-{
-namespace node
+
+namespace bcos::node
 {
 class ExitHandler
 {
 public:
-    void exit() { exitHandler(0); }
-    static void exitHandler(int) { ExitHandler::c_shouldExit.store(true); }
-    bool shouldExit() const { return ExitHandler::c_shouldExit.load(); }
+    static void exit() { exitHandler(0); }
+    static void exitHandler(int signal)
+    {
+        std::cout << "[" << bcos::getCurrentDateTime() << "] "
+                  << "exit because receive signal " << signal << std::endl;
+        ExitHandler::c_shouldExit.store(true);
+        ExitHandler::c_shouldExit.notify_all();
+    }
+    static bool shouldExit() { return ExitHandler::c_shouldExit.load(); }
 
-    static std::atomic_bool c_shouldExit;
+    static boost::atomic_bool c_shouldExit;
 };
-std::atomic_bool ExitHandler::c_shouldExit = {false};
+boost::atomic_bool ExitHandler::c_shouldExit = {false};
 
 void setDefaultOrCLocale()
 {
 #if __unix__
-    if (!std::setlocale(LC_ALL, ""))
+    if (std::setlocale(LC_ALL, "") == nullptr)
     {
         setenv("LC_ALL", "C", 1);
     }
 #endif
 }
-}  // namespace node
-}  // namespace bcos
+}  // namespace bcos::node

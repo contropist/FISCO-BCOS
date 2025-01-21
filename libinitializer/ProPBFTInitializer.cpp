@@ -19,11 +19,16 @@
  * @date 2021-06-10
  */
 #include "ProPBFTInitializer.h"
+#include "bcos-framework/protocol/ServiceDesc.h"
+#include "bcos-utilities/Exceptions.h"
+#include "fisco-bcos-tars-service/Common/TarsUtils.h"
 #include <bcos-pbft/pbft/PBFTImpl.h>
 #include <bcos-sealer/Sealer.h>
 #include <bcos-sync/BlockSync.h>
 #include <bcos-tars-protocol/client/GatewayServiceClient.h>
 #include <bcos-tars-protocol/client/RpcServiceClient.h>
+#include <bcos-tars-protocol/protocol/GroupInfoCodecImpl.h>
+#include <boost/throw_exception.hpp>
 
 using namespace bcos;
 using namespace bcos::tool;
@@ -31,41 +36,84 @@ using namespace bcos::protocol;
 using namespace bcos::crypto;
 using namespace bcos::initializer;
 
-ProPBFTInitializer::ProPBFTInitializer(bcos::initializer::NodeArchitectureType _nodeArchType,
+ProPBFTInitializer::ProPBFTInitializer(bcos::protocol::NodeArchitectureType _nodeArchType,
     bcos::tool::NodeConfig::Ptr _nodeConfig, ProtocolInitializer::Ptr _protocolInitializer,
     bcos::txpool::TxPoolInterface::Ptr _txpool, std::shared_ptr<bcos::ledger::Ledger> _ledger,
     bcos::scheduler::SchedulerInterface::Ptr _scheduler,
     bcos::storage::StorageInterface::Ptr _storage,
-    std::shared_ptr<bcos::front::FrontServiceInterface> _frontService)
+    std::shared_ptr<bcos::front::FrontServiceInterface> _frontService,
+    bcos::tool::NodeTimeMaintenance::Ptr _nodeTimeMaintenance)
   : PBFTInitializer(_nodeArchType, _nodeConfig, _protocolInitializer, _txpool, _ledger, _scheduler,
-        _storage, _frontService)
+        _storage, _frontService, _nodeTimeMaintenance)
 {
     m_timer = std::make_shared<Timer>(m_timerSchedulerInterval, "node info report");
+
+    std::vector<tars::TC_Endpoint> endPoints;
+    auto withoutTarsFramework = m_nodeConfig->withoutTarsFramework();
+
+    // init rpc client
+    auto rpcServiceName = m_nodeConfig->rpcServiceName();
+    m_nodeConfig->getTarsClientProxyEndpoints(bcos::protocol::RPC_NAME, endPoints);
+    auto rpcServicePrx = bcostars::createServantProxy<bcostars::RpcServicePrx>(
+        withoutTarsFramework, rpcServiceName, endPoints);
+    m_rpc = std::make_shared<bcostars::RpcServiceClient>(rpcServicePrx, rpcServiceName);
+
+    auto gatewayServiceName = m_nodeConfig->gatewayServiceName();
+    m_nodeConfig->getTarsClientProxyEndpoints(bcos::protocol::GATEWAY_NAME, endPoints);
+    auto gatewayServicePrx = bcostars::createServantProxy<bcostars::GatewayServicePrx>(
+        withoutTarsFramework, gatewayServiceName, endPoints);
+    m_gateway =
+        std::make_shared<bcostars::GatewayServiceClient>(gatewayServicePrx, gatewayServiceName);
+}
+
+void ProPBFTInitializer::scheduledTask()
+{
+    if (m_leaderElection && m_leaderElection->electionClusterOk())
+    {
+        m_timer->stop();
+        return;
+    }
+    // not enable failover, report nodeInfo to rpc/gw periodly
+    reportNodeInfo();
+    m_timer->restart();
 }
 
 void ProPBFTInitializer::reportNodeInfo()
 {
-    asyncNotifyGroupInfo<bcostars::RpcServicePrx, bcostars::RpcServiceClient>(
-        m_nodeConfig->rpcServiceName(), m_groupInfo);
-    asyncNotifyGroupInfo<bcostars::GatewayServicePrx, bcostars::GatewayServiceClient>(
-        m_nodeConfig->gatewayServiceName(), m_groupInfo);
-    m_timer->restart();
+    // notify groupInfo to rpc
+    m_rpc->asyncNotifyGroupInfo(m_groupInfo, [this](bcos::Error::Ptr&& _error) {
+        if (_error && m_running)
+        {
+            INITIALIZER_LOG(WARNING)
+                << LOG_DESC("asyncNotifyGroupInfo to rpc failed")
+                << LOG_KV("code", _error->errorCode()) << LOG_KV("msg", _error->errorMessage());
+        }
+    });
+
+    // notify groupInfo to gateway
+    m_gateway->asyncNotifyGroupInfo(m_groupInfo, [this](bcos::Error::Ptr&& _error) {
+        if (_error && m_running)
+        {
+            INITIALIZER_LOG(WARNING)
+                << LOG_DESC("asyncNotifyGroupInfo to gateway failed")
+                << LOG_KV("code", _error->errorCode()) << LOG_KV("msg", _error->errorMessage());
+        }
+    });
 }
 
 void ProPBFTInitializer::start()
 {
     PBFTInitializer::start();
-    if (m_timer)
+    if (m_timer && !m_nodeConfig->enableFailOver())
     {
         m_timer->start();
     }
-    m_sealer->start();
-    m_blockSync->start();
-    m_pbft->start();
+    m_running = true;
 }
 
 void ProPBFTInitializer::stop()
 {
+    m_running = false;
     if (m_timer)
     {
         m_timer->stop();
@@ -73,10 +121,20 @@ void ProPBFTInitializer::stop()
     PBFTInitializer::stop();
 }
 
+void ProPBFTInitializer::onGroupInfoChanged()
+{
+    if (!m_leaderElection || !m_leaderElection->electionClusterOk())
+    {
+        reportNodeInfo();
+        return;
+    }
+    PBFTInitializer::onGroupInfoChanged();
+}
+
+
 void ProPBFTInitializer::init()
 {
-    PBFTInitializer::init();
-    m_timer->registerTimeoutHandler(boost::bind(&ProPBFTInitializer::reportNodeInfo, this));
+    m_timer->registerTimeoutHandler(boost::bind(&ProPBFTInitializer::scheduledTask, this));
     m_blockSync->config()->registerOnNodeTypeChanged([this](bcos::protocol::NodeType _type) {
         INITIALIZER_LOG(INFO) << LOG_DESC("OnNodeTypeChange") << LOG_KV("type", _type)
                               << LOG_KV("nodeName", m_nodeConfig->nodeName());
@@ -88,6 +146,23 @@ void ProPBFTInitializer::init()
             return;
         }
         nodeInfo->setNodeType(_type);
-        reportNodeInfo();
+        onGroupInfoChanged();
     });
+    PBFTInitializer::init();
+    // Note: m_leaderElection is created after PBFTInitializer::init
+    if (m_leaderElection)
+    {
+        m_leaderElection->registerOnElectionClusterException([this]() {
+            INITIALIZER_LOG(INFO) << LOG_DESC("OnElectionClusterException")
+                                  << LOG_KV("nodeName", m_nodeConfig->nodeName());
+        });
+        m_leaderElection->registerOnElectionClusterRecover([]() {
+            INITIALIZER_LOG(INFO) << LOG_DESC(
+                "OnElectionClusterRecover: stop reportNodeInfo to rpc/gateway");
+        });
+    }
+    else
+    {
+        reportNodeInfo();
+    }
 }

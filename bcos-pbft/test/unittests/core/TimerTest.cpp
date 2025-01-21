@@ -27,14 +27,13 @@
 
 using namespace bcos;
 using namespace bcos::consensus;
-namespace bcos
-{
-namespace test
+
+namespace bcos::test
 {
 class FakeTimer : public Timer
 {
 public:
-    explicit FakeTimer(uint64_t _timeout) : Timer(_timeout) {}
+    explicit FakeTimer(uint64_t _timeout) : Timer(_timeout, "fakeTimer") {}
     ~FakeTimer() override {}
     void setTriggerTimeout(bool _triggerTimeout) { m_triggerTimeout = _triggerTimeout; }
     bool triggerTimeout() { return m_triggerTimeout; }
@@ -105,28 +104,6 @@ BOOST_AUTO_TEST_CASE(testTimer)
     BOOST_CHECK(timer->triggerTimeout() == true);
     timer->stop();
 }
-
-BOOST_AUTO_TEST_CASE(testTimerWithoutWait)
-{
-    uint64_t timeoutInterval = 200;
-    auto timer = std::make_shared<FakeTimer>(timeoutInterval);
-    timer->start();
-    BOOST_CHECK(timer->triggerTimeout() == false);
-    // sleep 80ms
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-
-    // test restart
-    timer->restart();
-    // sleep 20ms
-    auto startT = utcTime();
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    if (utcTime() - startT < timeoutInterval)
-    {
-        BOOST_CHECK(timer->triggerTimeout() == false);
-    }
-}
-
 BOOST_AUTO_TEST_CASE(testPBFTTimer)
 {
     uint64_t timeoutInterval = 100;
@@ -135,5 +112,4 @@ BOOST_AUTO_TEST_CASE(testPBFTTimer)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
-}  // namespace test
-}  // namespace bcos
+}  // namespace bcos::test

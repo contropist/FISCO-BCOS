@@ -24,74 +24,78 @@ using namespace bcos::protocol;
 using namespace bcos::txpool;
 
 void LedgerNonceChecker::initNonceCache(
-    std::map<int64_t, bcos::protocol::NonceListPtr> _initialNonces)
+    std::shared_ptr<std::map<int64_t, bcos::protocol::NonceListPtr> > _initialNonces)
 {
-    for (auto const& it : _initialNonces)
+    for (auto const& it : *_initialNonces)
     {
         m_blockNonceCache[it.first] = it.second;
         TxPoolNonceChecker::batchInsert(it.first, it.second);
     }
 }
 
-TransactionStatus LedgerNonceChecker::checkNonce(Transaction::ConstPtr _tx, bool _shouldUpdate)
+TransactionStatus LedgerNonceChecker::checkNonce(const bcos::protocol::Transaction& _tx)
 {
     // check nonce
-    auto status = TxPoolNonceChecker::checkNonce(_tx, _shouldUpdate);
+    auto status = TxPoolNonceChecker::checkNonce(_tx);
     if (status != TransactionStatus::None)
     {
         return status;
     }
-    // check blockLimit
-    return checkBlockLimit(_tx);
+    if (m_checkBlockLimit && _tx.type() == static_cast<uint8_t>(TransactionType::BCOSTransaction))
+    {  // check blockLimit
+        return checkBlockLimit(_tx);
+    }
+    return TransactionStatus::None;
 }
 
-TransactionStatus LedgerNonceChecker::checkBlockLimit(bcos::protocol::Transaction::ConstPtr _tx)
+TransactionStatus LedgerNonceChecker::checkBlockLimit(const bcos::protocol::Transaction& _tx)
 {
     auto blockNumber = m_blockNumber.load();
-    if (blockNumber >= _tx->blockLimit() || (blockNumber + m_blockLimit) < _tx->blockLimit())
+    if (blockNumber >= _tx.blockLimit() || (blockNumber + m_blockLimit) < _tx.blockLimit())
     {
-        NONCECHECKER_LOG(WARNING) << LOG_DESC("InvalidBlockLimit")
-                                  << LOG_KV("blkLimit", _tx->blockLimit())
-                                  << LOG_KV("blockLimit", m_blockLimit)
-                                  << LOG_KV("curBlk", m_blockNumber)
-                                  << LOG_KV("tx", _tx->hash().abridged());
+        NONCECHECKER_LOG(DEBUG) << LOG_DESC("InvalidBlockLimit")
+                                << LOG_KV("blkLimit", _tx.blockLimit())
+                                << LOG_KV("blockLimit", m_blockLimit)
+                                << LOG_KV("curBlk", m_blockNumber)
+                                << LOG_KV("tx", _tx.hash().abridged());
         return TransactionStatus::BlockLimitCheckFail;
     }
     return TransactionStatus::None;
 }
 
 
-void LedgerNonceChecker::batchInsert(BlockNumber _batchId, NonceListPtr _nonceList)
+void LedgerNonceChecker::batchInsert(BlockNumber _batchId, NonceListPtr const& _nonceList)
 {
     if (m_blockNumber < _batchId)
     {
         m_blockNumber.store(_batchId);
     }
-    ssize_t batchToBeRemoved = (_batchId > m_blockLimit) ? (_batchId - m_blockLimit) : -1;
+    ssize_t batchToBeRemoved = _batchId - m_blockLimit;
     // insert the latest nonces
     TxPoolNonceChecker::batchInsert(_batchId, _nonceList);
 
-    WriteGuard l(x_blockNonceCache);
-    if (!m_blockNonceCache.count(_batchId))
+    WriteGuard lock(x_blockNonceCache);
+    if (!m_blockNonceCache.contains(_batchId))
     {
         m_blockNonceCache[_batchId] = _nonceList;
         NONCECHECKER_LOG(DEBUG) << LOG_DESC("batchInsert nonceList") << LOG_KV("batchId", _batchId)
                                 << LOG_KV("nonceSize", _nonceList->size());
     }
     // the genesis has no nonceList
-    if (batchToBeRemoved == -1)
+    if (batchToBeRemoved <= 0)
     {
         return;
     }
     // remove the expired nonces
-    if (!m_blockNonceCache.count(batchToBeRemoved))
+    auto it = m_blockNonceCache.find(batchToBeRemoved);
+    if (it == m_blockNonceCache.end())
     {
         NONCECHECKER_LOG(WARNING) << LOG_DESC("batchInsert: miss cache when remove expired cache")
                                   << LOG_KV("batchToBeRemoved", batchToBeRemoved);
         return;
     }
-    auto nonceList = m_blockNonceCache[batchToBeRemoved];
-    m_blockNonceCache.erase(batchToBeRemoved);
+    auto nonceList = std::move(it->second);
+    m_blockNonceCache.erase(it);
     batchRemove(*nonceList);
     NONCECHECKER_LOG(DEBUG) << LOG_DESC("batchInsert: remove expired nonce")
                             << LOG_KV("batchToBeRemoved", batchToBeRemoved)

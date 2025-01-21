@@ -23,9 +23,13 @@
 #include "../Common.h"
 #include "../executive/TransactionExecutive.h"
 #include "EVMHostInterface.h"
-#include "bcos-framework/interfaces/storage/Table.h"
-#include "bcos-table/src/StateStorage.h"
-#include "evmc/evmc.hpp"
+#include "bcos-codec/wrapper/CodecWrapper.h"
+#include "bcos-executor/src/precompiled/common/Utilities.h"
+#include "bcos-framework/bcos-framework/ledger/LedgerTypeDef.h"
+#include "bcos-framework/storage/LegacyStorageMethods.h"
+#include <bcos-framework/executor/ExecutionMessage.h>
+#include <bcos-framework/ledger/EVMAccount.h>
+#include <bcos-framework/protocol/Protocol.h>
 #include <bcos-utilities/Common.h>
 #include <evmc/evmc.h>
 #include <evmc/helpers.h>
@@ -33,12 +37,12 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/thread.hpp>
 #include <boost/throw_exception.hpp>
-#include <algorithm>
 #include <exception>
 #include <iterator>
-#include <limits>
-#include <sstream>
+#include <memory>
+#include <utility>
 #include <vector>
+
 
 using namespace std;
 using namespace bcos;
@@ -46,29 +50,10 @@ using namespace bcos::executor;
 using namespace bcos::storage;
 using namespace bcos::protocol;
 
-namespace  // anonymous
-{
-/// Upper bound of stack space needed by single CALL/CREATE execution. Set
-/// experimentally.
-// static size_t const c_singleExecutionStackSize = 100 * 1024;
-
-static const std::string SYS_ASSET_NAME = "name";
-static const std::string SYS_ASSET_FUNGIBLE = "fungible";
-static const std::string SYS_ASSET_TOTAL = "total";
-static const std::string SYS_ASSET_SUPPLIED = "supplied";
-static const std::string SYS_ASSET_ISSUER = "issuer";
-static const std::string SYS_ASSET_DESCRIPTION = "description";
-static const std::string SYS_ASSET_INFO = "_sys_asset_info_";
-
-}  // anonymous namespace
-
-namespace bcos
-{
-namespace executor
+namespace bcos::executor
 {
 namespace
 {
-evmc_gas_metrics ethMetrics{32000, 20000, 5000, 200, 9000, 2300, 25000};
 
 evmc_bytes32 evm_hash_fn(const uint8_t* data, size_t size)
 {
@@ -76,19 +61,18 @@ evmc_bytes32 evm_hash_fn(const uint8_t* data, size_t size)
 }
 }  // namespace
 
-// crypto::Hash::Ptr g_hashImpl = nullptr;
-
 HostContext::HostContext(CallParameters::UniquePtr callParameters,
     std::shared_ptr<TransactionExecutive> executive, std::string tableName)
-  : m_callParameters(std::move(callParameters)),
+  : evmc_host_context(),
+    m_callParameters(std::move(callParameters)),
     m_executive(std::move(executive)),
-    m_tableName(tableName)
+    m_tableName(std::move(tableName))
 {
     interface = getHostInterface();
     wasm_interface = getWasmHostInterface();
 
     hash_fn = evm_hash_fn;
-    version = 0x03000000;
+    version = m_executive->blockContext().blockVersion();
     isSMCrypto = false;
 
     if (hashImpl() && hashImpl()->getHashImplType() == crypto::HashImplType::Sm3Hash)
@@ -105,16 +89,33 @@ std::string HostContext::get(const std::string_view& _key)
     {
         return std::string(entry->getField(0));
     }
-
-    return std::string();
+    return {};
 }
 
 void HostContext::set(const std::string_view& _key, std::string _value)
 {
+    auto start = utcTimeUs();
     Entry entry;
     entry.importFields({std::move(_value)});
 
     m_executive->storage().setRow(m_tableName, _key, std::move(entry));
+}
+
+
+std::string addressBytesStr2String(std::string_view receiveAddressBytes)
+{
+    std::string strAddress;
+    strAddress.reserve(receiveAddressBytes.size() * 2);
+    boost::algorithm::hex_lower(
+        receiveAddressBytes.begin(), receiveAddressBytes.end(), std::back_inserter(strAddress));
+
+    return strAddress;
+}
+
+std::string evmAddress2String(const evmc_address& address)
+{
+    auto receiveAddressBytes = fromEvmC(address);
+    return addressBytesStr2String(receiveAddressBytes);
 }
 
 evmc_result HostContext::externalRequest(const evmc_message* _msg)
@@ -122,26 +123,38 @@ evmc_result HostContext::externalRequest(const evmc_message* _msg)
     // Convert evmc_message to CallParameters
     auto request = std::make_unique<CallParameters>(CallParameters::MESSAGE);
 
-    request->senderAddress = myAddress();
     request->origin = origin();
     request->status = 0;
+
+    if (features().get(ledger::Features::Flag::feature_balance))
+    {
+        request->value = fromEvmC(_msg->value);
+        request->gasPrice = gasPrice();
+    }
+
+    const auto& blockContext = m_executive->blockContext();
+
+    request->senderAddress = myAddress();
 
     switch (_msg->kind)
     {
     case EVMC_CREATE2:
         request->createSalt = fromEvmC(_msg->create2_salt);
+        if (features().get(
+                ledger::Features::Flag::bugfix_evm_create2_delegatecall_staticcall_codecopy))
+        {
+            request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);
+            request->create = true;
+        }
         break;
     case EVMC_CALL:
-        if (m_executive->blockContext().lock()->isWasm())
+        if (blockContext.isWasm())
         {
             request->receiveAddress.assign((char*)_msg->destination_ptr, _msg->destination_len);
         }
         else
         {
-            auto receiveAddressBytes = fromEvmC(_msg->destination);
-            request->receiveAddress.reserve(receiveAddressBytes.size() * 2);
-            boost::algorithm::hex_lower(receiveAddressBytes.begin(), receiveAddressBytes.end(),
-                std::back_inserter(request->receiveAddress));
+            request->receiveAddress = evmAddress2String(_msg->code_address);
         }
 
         request->codeAddress = request->receiveAddress;
@@ -149,48 +162,128 @@ evmc_result HostContext::externalRequest(const evmc_message* _msg)
         break;
     case EVMC_DELEGATECALL:
     case EVMC_CALLCODE:
-        BOOST_THROW_EXCEPTION(
-            BCOS_ERROR(-1, "Unsupported opcode EVM_DELEGATECALL or EVM_CALLCODE"));
-        break;
+    {
+        if (!blockContext.isWasm())
+        {
+            if (blockContext.blockVersion() >= (uint32_t)bcos::protocol::BlockVersion::V3_1_VERSION)
+            {
+                request->delegateCall = true;
+                request->codeAddress = evmAddress2String(_msg->code_address);
+                request->delegateCallSender = evmAddress2String(_msg->sender);
+
+                if (features().get(ledger::Features::Flag::bugfix_call_noaddr_return))
+                {
+                    request->receiveAddress = myAddress();
+                }
+                else
+                {
+                    request->receiveAddress = codeAddress();
+                }
+                request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);
+                break;
+            }
+        }
+
+        // old logic
+        evmc_result result;
+        result.status_code = evmc_status_code(EVMC_INVALID_INSTRUCTION);
+        result.release = nullptr;  // no output to release
+        result.gas_left = 0;
+        result.gas_refund = 0;
+
+        // Bugfix:
+        // To compat with lower version,
+        // we must set output_size larger than 0 to trigger OUT_OF_GAS
+        static auto response = std::make_unique<CallParameters>(CallParameters::MESSAGE);
+        response->data = bytes(130 * 1024 * 1024);
+        result.output_size = response->data.size();
+        result.output_data = response->data.data();
+        EXECUTOR_LOG(WARNING) << LOG_DESC(
+                                     "delegatecall/callcode is unsupported in your compatibility "
+                                     "version(3.0.0), please update it to 3.1.0(or after) using "
+                                     "console. Otherwise it may "
+                                     "lead to unpredictable behavior.")
+                              << LOG_KV("version", blockContext.blockVersion());
+
+        return result;
+    }
     case EVMC_CREATE:
         request->data.assign(_msg->input_data, _msg->input_data + _msg->input_size);
         request->create = true;
         break;
     }
+    if (versionCompareTo(blockContext.blockVersion(), BlockVersion::V3_1_VERSION) >= 0)
+    {
+        request->logEntries = std::move(m_callParameters->logEntries);
+    }
     request->gas = _msg->gas;
     // if (built in precompiled) then execute locally
-    auto blockContext = m_executive->blockContext().lock();
 
-    if (m_executive->isBuiltInPrecompiled(request->receiveAddress))
+    if (m_executive->isStaticPrecompiled(request->receiveAddress))
     {
         return callBuiltInPrecompiled(request, false);
     }
-    if (m_executive->isEthereumPrecompiled(request->receiveAddress) && !blockContext->isWasm())
+    if (!blockContext.isWasm() && m_executive->isEthereumPrecompiled(request->receiveAddress))
     {
         return callBuiltInPrecompiled(request, true);
     }
 
     request->staticCall = m_callParameters->staticCall;
 
+    if (features().get(ledger::Features::Flag::bugfix_evm_create2_delegatecall_staticcall_codecopy))
+    {
+        // EVM STATICCALL opcode support
+        if (_msg->flags & EVMC_STATIC)
+        {
+            request->staticCall = true;
+        }
+    }
+
+    if (request->create && features().get(ledger::Features::Flag::feature_evm_address)) [[unlikely]]
+    {
+        // account must exist
+        ledger::account::EVMAccount account(*m_executive->storage().getRawStorage(),
+            request->senderAddress, features().get(ledger::Features::Flag::feature_raw_address));
+        request->nonce = task::syncWait([](decltype(account) contract) -> task::Task<u256> {
+            auto const nonceString = co_await ledger::account::nonce(contract);
+            // uint in storage
+            auto nonce = u256(nonceString.value_or("0"));
+            co_return nonce;
+        }(std::move(account)));
+    }
+
     auto response = m_executive->externalCall(std::move(request));
 
-    // Convert CallParameters to evmc_result
-    evmc_result result;
-    result.status_code = evmc_status_code(response->status);
+    // Convert CallParameters to evmc_resultx
+    evmc_result result{.status_code = toEVMStatus(response, blockContext),
+        .gas_left = response->gas,
+        .gas_refund = 0,
+        .output_data = response->data.data(),
+        .output_size = response->data.size(),
+        .release = nullptr,  // TODO: check if the response data need to release
+        .create_address = toEvmC(boost::algorithm::unhex(response->newEVMContractAddress)),
+        .padding = {}};
 
-    result.create_address =
-        toEvmC(boost::algorithm::unhex(response->newEVMContractAddress));  // TODO: check if ok
-
-    // TODO: check if the response data need to release
-    result.output_data = response->data.data();
-    result.output_size = response->data.size();
-    result.release = nullptr;  // Response own by HostContext
-    result.gas_left = response->gas;
-
+    if (features().get(ledger::Features::Flag::bugfix_event_log_order))
+    {
+        // put event log by stack(dfs) order
+        m_callParameters->logEntries = std::move(response->logEntries);
+    }
     // Put response to store in order to avoid data lost
     m_responseStore.emplace_back(std::move(response));
 
     return result;
+}
+
+evmc_status_code HostContext::toEVMStatus(std::unique_ptr<CallParameters> const& response,
+    const bcos::executor::BlockContext& blockContext)
+{
+    if (blockContext.blockVersion() >= (uint32_t)(bcos::protocol::BlockVersion::V3_1_VERSION))
+    {
+        return evmc_status_code(response->evmStatus);
+    }
+
+    return evmc_status_code(response->status);
 }
 
 evmc_result HostContext::callBuiltInPrecompiled(
@@ -198,28 +291,43 @@ evmc_result HostContext::callBuiltInPrecompiled(
 {
     auto callResults = std::make_unique<CallParameters>(CallParameters::FINISHED);
     evmc_result preResult{};
-    int32_t resultCode;
+    int32_t resultCode = 0;
     bytes resultData;
 
     if (_isEvmPrecompiled)
     {
-        callResults->gas =
+        auto gasUsed =
             m_executive->costOfPrecompiled(_request->receiveAddress, ref(_request->data));
-        auto [success, output] =
-            m_executive->executeOriginPrecompiled(_request->receiveAddress, ref(_request->data));
-        resultCode =
-            (int32_t)(success ? TransactionStatus::None : TransactionStatus::RevertInstruction);
-        resultData.swap(output);
+        /// NOTE: this assignment is wrong, will cause out of gas, should not use evm precompiled
+        /// before 3.1.0
+        callResults->gas = gasUsed;
+        if (versionCompareTo(version, BlockVersion::V3_1_VERSION) >= 0)
+        {
+            callResults->gas = _request->gas - gasUsed;
+        }
+        try
+        {
+            auto [success, output] = m_executive->executeOriginPrecompiled(
+                _request->receiveAddress, ref(_request->data));
+            resultCode =
+                (int32_t)(success ? TransactionStatus::None : TransactionStatus::RevertInstruction);
+            resultData.swap(output);
+        }
+        catch (...)
+        {
+            resultCode = (int32_t)TransactionStatus::RevertInstruction;
+        }
     }
     else
     {
         try
         {
-            auto precompiledResponse = m_executive->execPrecompiled(_request->receiveAddress,
-                ref(_request->data), _request->origin, _request->senderAddress, _request->gas);
-            callResults->gas = precompiledResponse->m_gas;
+            auto precompiledCallParams =
+                std::make_shared<precompiled::PrecompiledExecResult>(*_request);
+            precompiledCallParams = m_executive->execPrecompiled(precompiledCallParams);
+            callResults->gas = precompiledCallParams->m_gasLeft;
             resultCode = (int32_t)TransactionStatus::None;
-            resultData.swap(precompiledResponse->m_execResult);
+            resultData = std::move(precompiledCallParams->m_execResult);
         }
         catch (protocol::PrecompiledError& e)
         {
@@ -229,6 +337,12 @@ evmc_result HostContext::callBuiltInPrecompiled(
         {
             resultCode = (int32_t)TransactionStatus::Unknown;
         }
+    }
+
+    if (features().get(ledger::Features::Flag::bugfix_event_log_order))
+    {
+        // put event log by stack(dfs) order
+        m_callParameters->logEntries = std::move(_request->logEntries);
     }
 
     if (resultCode != (int32_t)TransactionStatus::None)
@@ -241,7 +355,31 @@ evmc_result HostContext::callBuiltInPrecompiled(
         return preResult;
     }
 
-    preResult.gas_left = _request->gas - callResults->gas;
+    if (features().get(ledger::Features::Flag::feature_balance) && _request->value > 0) [[unlikely]]
+    {
+        // must transfer balance
+        auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
+        callParameters->origin = bcos::precompiled::BALANCE_PRECOMPILED_ADDRESS;
+        callParameters->senderAddress = _request->senderAddress;
+        callParameters->receiveAddress = _request->receiveAddress;
+        callParameters->value = _request->value;
+        callParameters->staticCall = staticCall();
+
+        callParameters->gas = callResults->gas;
+
+        callResults = m_executive->transferBalance(std::move(callParameters), 0, myAddress());
+
+        if (callResults->status != (int32_t)TransactionStatus::None)
+        {
+            preResult.status_code = (evmc_status_code)callResults->evmStatus;
+            preResult.gas_left = callResults->gas;
+            m_responseStore.emplace_back(std::move(callResults));
+            return preResult;
+        }
+    }
+
+    preResult.gas_left = callResults->gas;
+    preResult.gas_refund = 0;
     if (preResult.gas_left < 0)
     {
         callResults->type = CallParameters::REVERT;
@@ -262,8 +400,29 @@ evmc_result HostContext::callBuiltInPrecompiled(
 bool HostContext::setCode(bytes code)
 {
     // set code will cause exception when exec revert
-    auto table = m_executive->storage().openTable(m_tableName);
-    if (table)
+    // new logic
+    if (blockVersion() >= uint32_t(bcos::protocol::BlockVersion::V3_1_VERSION))
+    {
+        auto contractTable = m_executive->storage().openTable(m_tableName);
+        // set code hash in contract table
+        if (contractTable)
+        {
+            m_executive->setCode(m_tableName, std::move(code));
+            if (features().get(ledger::Features::Flag::feature_balance) &&
+                !features().get(ledger::Features::Flag::bugfix_delete_account_code))
+            {
+                // update account's special code
+                Entry entryToDelete;
+                entryToDelete.setStatus(Entry::DELETED);
+                m_executive->storage().setRow(m_tableName, ACCOUNT_CODE, std::move(entryToDelete));
+            }
+            return true;
+        }
+        return false;
+    }
+    // old logic
+    auto contractTable = m_executive->storage().openTable(m_tableName);
+    if (contractTable)
     {
         Entry codeHashEntry;
         auto codeHash = hashImpl()->hash(code);
@@ -280,24 +439,126 @@ bool HostContext::setCode(bytes code)
 
 void HostContext::setCodeAndAbi(bytes code, string abi)
 {
+    EXECUTOR_LOG(TRACE) << LOG_DESC("save code and abi") << LOG_KV("tableName", m_tableName)
+                        << LOG_KV("codeSize", code.size()) << LOG_KV("abiSize", abi.size());
     if (setCode(std::move(code)))
     {
+        // new logic
+        if (blockVersion() >= uint32_t(bcos::protocol::BlockVersion::V3_1_VERSION))
+        {
+            // set abi in abi table
+            auto codeEntry = m_executive->storage().getRow(m_tableName, ACCOUNT_CODE_HASH);
+            auto codeHash = codeEntry->getField(0);
+
+            if (c_fileLogLevel <= TRACE) [[unlikely]]
+            {
+                EXECUTOR_LOG(TRACE) << LOG_DESC("set abi") << LOG_KV("codeHash", toHex(codeHash))
+                                    << LOG_KV("abiSize", abi.size());
+            }
+
+            auto abiEntry = m_executive->storage().getRow(bcos::ledger::SYS_CONTRACT_ABI, codeHash);
+            // if abiEntry is empty, also need set abi
+            if (!abiEntry || (features().get(ledger::Features::Flag::bugfix_empty_abi_reset) &&
+                                 abiEntry && abiEntry->size() == 0))
+            {
+                abiEntry = std::make_optional<Entry>();
+                abiEntry->importFields({std::move(abi)});
+
+                m_executive->storage().setRow(
+                    bcos::ledger::SYS_CONTRACT_ABI, codeHash, std::move(abiEntry.value()));
+            }
+            m_executive->setAbiByCodeHash(codeHash, std::move(abi));
+
+            return;
+        }
+
+        // old logic
         Entry abiEntry;
         abiEntry.importFields({std::move(abi)});
         m_executive->storage().setRow(m_tableName, ACCOUNT_ABI, abiEntry);
     }
 }
 
-size_t HostContext::codeSizeAt(const std::string_view& _a)
+bcos::bytes HostContext::externalCodeRequest(const std::string_view& address)
 {
-    (void)_a;
-    return 1;  // TODO: 1 code size ok?
+    auto request = std::make_unique<CallParameters>(CallParameters::MESSAGE);
+    request->gas = gas();
+    request->senderAddress = myAddress();
+    request->receiveAddress = myAddress();
+    request->data = bcos::protocol::GET_CODE_INPUT_BYTES;
+    request->origin = origin();
+    request->status = 0;
+    request->delegateCall = false;
+    request->codeAddress = addressBytesStr2String(address);
+    request->staticCall = staticCall();
+    auto response = m_executive->externalCall(std::move(request));
+
+    if ((m_executive->blockContext().features().get(
+             ledger::Features::Flag::bugfix_eoa_as_contract) &&
+            precompiled::isDynamicPrecompiledAccountCode(fromBytes(response->data))) ||
+        (m_executive->blockContext().features().get(
+             ledger::Features::Flag::bugfix_eoa_match_failed) &&
+            bcos::precompiled::matchDynamicAccountCode(
+                std::string_view((char*)response->data.data(), response->data.size()))))
+    {
+        return bytes();
+    }
+    else
+    {
+        return std::move(response->data);
+    }
 }
 
-h256 HostContext::codeHashAt(const std::string_view& _a)
+size_t HostContext::codeSizeAt(const std::string_view& address)
 {
-    (void)_a;
-    return h256();  // TODO: ok?
+    if (m_executive->blockContext().blockVersion() >=
+        (uint32_t)bcos::protocol::BlockVersion::V3_1_VERSION)
+    {
+        /*
+         Note:
+            evm precompiled(0x1 ~ 0x9): return 0 (Is the same as eth)
+            FISCO BCOS precompiled: return 1
+
+            Because evm precompiled is call by build-in opcode, no need to get code size before
+         called, but FISCO BCOS precompiled is call like contract, so it need to get code size.
+         */
+
+        if (m_executive->isPrecompiled(addressBytesStr2String(address)))
+        {
+            // Only FISCO BCOS precompile: constant precompiled or build-in precompiled
+            // evm precompiled address will go down to externalCodeRequest() and get empty code
+            return 1;
+        }
+        auto code = externalCodeRequest(address);
+        return code.size();  // OPCODE num is bytes.size
+    }
+    return 1;
+}
+
+h256 HostContext::codeHashAt(const std::string_view& address)
+{
+    if (m_executive->blockContext().blockVersion() >=
+        (uint32_t)bcos::protocol::BlockVersion::V3_1_VERSION)
+    {
+        // precompiled return 0 hash;
+        if (m_executive->isPrecompiled(addressBytesStr2String(address)))
+        {
+            return {0};
+        }
+        auto code = externalCodeRequest(address);
+
+        if (code.empty())
+        {
+            if (features().get(ledger::Features::Flag::bugfix_precompiled_codehash))
+            {
+                return {0};
+            }
+        }
+
+        auto hash = hashImpl()->hash(code).asBytes();
+        return h256(hash);
+    }
+    return {0};
 }
 
 VMSchedule const& HostContext::vmSchedule() const
@@ -305,32 +566,82 @@ VMSchedule const& HostContext::vmSchedule() const
     return m_executive->vmSchedule();
 }
 
-u256 HostContext::store(const u256& _n)
+evmc_bytes32 HostContext::store(const evmc_bytes32* key)
 {
-    auto key = toEvmC(_n);
-    auto keyView = std::string_view((char*)key.bytes, sizeof(key.bytes));
+    evmc_bytes32 result;
+    auto keyView = std::string_view((char*)key->bytes, sizeof(key->bytes));
 
     auto entry = m_executive->storage().getRow(m_tableName, keyView);
     if (entry)
     {
-        return fromBigEndian<u256>(entry->getField(0));
+        auto field = entry->getField(0);
+        std::uninitialized_copy_n(field.data(), sizeof(result), result.bytes);
     }
+    else
+    {
+        std::uninitialized_fill_n(result.bytes, sizeof(result), 0);
+    }
+    return result;
+}
+evmc_bytes32 HostContext::getTransientStorage(const evmc_bytes32* key)
+{
+    evmc_bytes32 result;
+    auto keyView = std::string_view((char*)key->bytes, sizeof(key->bytes));
 
-    return u256();
+    auto transientStorageMap = m_executive->blockContext().getTransientStorageMap();
+    using TSMap = bcos::BucketMap<int64_t, std::shared_ptr<storage::StateStorageInterface>>;
+    TSMap::ReadAccessor readAccessor;
+    auto has =
+        transientStorageMap->find<TSMap::ReadAccessor>(readAccessor, m_executive->contextID());
+    if (!has)
+    {
+        EXECUTOR_LOG(DEBUG) << LOG_DESC("get transient storage failed")
+                            << LOG_KV("transientStorageMapKey", m_executive->contextID())
+                            << LOG_KV("key", keyView);
+        std::uninitialized_fill_n(result.bytes, sizeof(result), 0);
+        return result;
+    }
+    auto entry = readAccessor.value()->getRow(m_tableName, keyView);
+    if (!entry.first && entry.second.has_value())
+    {
+        auto field = entry.second->getField(0);
+        std::uninitialized_copy_n(field.data(), sizeof(result), result.bytes);
+    }
+    else
+    {
+        std::uninitialized_fill_n(result.bytes, sizeof(result), 0);
+    }
+    return result;
 }
 
-void HostContext::setStore(u256 const& _n, u256 const& _v)
+void HostContext::setStore(const evmc_bytes32* key, const evmc_bytes32* value)
 {
-    auto key = toEvmC(_n);
-    auto keyView = std::string_view((char*)key.bytes, sizeof(key.bytes));
+    auto keyView = std::string_view((char*)key->bytes, sizeof(key->bytes));
+    bytes valueBytes(value->bytes, value->bytes + sizeof(value->bytes));
 
-    auto value = toEvmC(_v);
-    bytes valueBytes(value.bytes, value.bytes + sizeof(value.bytes));
+    Entry entry;
+    entry.importFields({std::move(valueBytes)});
+    m_executive->storage().setRow(m_tableName, keyView, std::move(entry));
+}
+
+void HostContext::setTransientStorage(const evmc_bytes32* key, const evmc_bytes32* value)
+{
+    auto keyView = std::string_view((char*)key->bytes, sizeof(key->bytes));
+    bytes valueBytes(value->bytes, value->bytes + sizeof(value->bytes));
 
     Entry entry;
     entry.importFields({std::move(valueBytes)});
 
-    m_executive->storage().setRow(m_tableName, keyView, std::move(entry));
+    bcos::storage::StateStorageInterface::Ptr transientStorage =
+        m_executive->getTransientStateStorage(m_executive->contextID());
+
+    transientStorage->asyncSetRow(m_tableName, keyView, std::move(entry), [](auto&& error) {
+        if (error)
+        {
+            EXECUTOR_LOG(ERROR) << LOG_DESC("set transient storage failed")
+                                << LOG_KV("error", error);
+        }
+    });
 }
 
 void HostContext::log(h256s&& _topics, bytesConstRef _data)
@@ -356,17 +667,44 @@ void HostContext::log(h256s&& _topics, bytesConstRef _data)
         _data.toBytes());
 }
 
-h256 HostContext::blockHash() const
+h256 HostContext::blockHash(int64_t _number) const
 {
-    return m_executive->blockContext().lock()->hash();
+    if (m_executive->blockContext().blockVersion() >=
+        (uint32_t)bcos::protocol::BlockVersion::V3_1_VERSION)
+    {
+        if (_number >= blockNumber() || _number < 0)
+        {
+            return h256("");
+        }
+        else
+        {
+            return m_executive->blockContext().blockHash(_number);
+        }
+    }
+    else
+    {
+        return m_executive->blockContext().hash();
+    }
 }
+
 int64_t HostContext::blockNumber() const
 {
-    return m_executive->blockContext().lock()->number();
+    return m_executive->blockContext().number();
 }
-int64_t HostContext::timestamp() const
+
+uint32_t HostContext::blockVersion() const
 {
-    return m_executive->blockContext().lock()->timestamp();
+    return m_executive->blockContext().blockVersion();
+}
+
+uint64_t HostContext::timestamp() const
+{
+    if (m_executive->blockContext().features().get(ledger::Features::Flag::feature_evm_timestamp))
+    {
+        // millisecond to second
+        return m_executive->blockContext().timestamp() / 1000;
+    }
+    return m_executive->blockContext().timestamp();
 }
 
 std::string_view HostContext::myAddress() const
@@ -374,405 +712,96 @@ std::string_view HostContext::myAddress() const
     return m_executive->contractAddress();
 }
 
-bytesConstRef HostContext::code()
+std::optional<storage::Entry> HostContext::code()
 {
-    auto entry = m_executive->storage().getRow(m_tableName, ACCOUNT_CODE);
-    if (entry)
+    if (blockVersion() >= uint32_t(bcos::protocol::BlockVersion::V3_1_VERSION))
     {
-        auto code = entry->getField(0);
-
-        return bytesConstRef((bcos::byte*)code.data(), code.size());
+        auto hash = codeHash();
+        auto entry = m_executive->getCodeByHash(std::string_view((char*)hash.data(), hash.size()));
+        if (entry && entry.has_value() && !entry->get().empty())
+        {
+            return entry;
+        }
     }
 
-    return bytesConstRef();
+    return m_executive->getCodeEntryFromContractTable(m_tableName);
 }
 
-h256 HostContext::codeHash()
+crypto::HashType HostContext::codeHash()
 {
-    auto entry = m_executive->storage().getRow(m_tableName, ACCOUNT_CODE_HASH);
-    if (entry)
-    {
-        auto code = entry->getField(0);
+    return m_executive->getCodeHash(m_tableName);
+}
 
-        return h256(std::string(code));  // TODO: h256 support decode from string_view
+bool HostContext::isWasm()
+{
+    return m_executive->isWasm();
+}
+
+evmc_bytes32 HostContext::getBalance(const evmc_address* _addr)
+{
+    // address
+    auto addr2GetBalance = address2HexString(*_addr);
+
+    // input
+    auto codec = bcos::CodecWrapper(
+        m_executive->blockContext().hashHandler(), m_executive->blockContext().isWasm());
+    // get balance from account table
+    auto params = codec.encodeWithSig("getAccountBalance()");
+    auto tableName = getContractTableName(addr2GetBalance);
+    std::vector<std::string> tableNameVector = {tableName};
+    auto params2 = codec.encode(tableNameVector, params);
+    auto input = codec.encode(std::string(precompiled::ACCOUNT_ADDRESS), params2);
+
+    auto response = bcos::precompiled::externalRequest(m_executive, ref(input),
+        std::string(bcos::precompiled::BALANCE_PRECOMPILED_ADDRESS), myAddress(), addr2GetBalance,
+        false, false, gas(), true);
+
+    u256 result;
+    codec.decode(ref(response->data), result);
+
+    EXECUTIVE_LOG(DEBUG) << LOG_DESC("EVM getBalance successful")
+                         << LOG_KV("balance result", result);
+
+    // Put response to store in order to avoid data lost
+    m_responseStore.emplace_back(std::move(response));
+
+    return toEvmC(result);
+}
+
+bool HostContext::selfdestruct(const evmc_address* _addr, const evmc_address* _beneficiary)
+{
+    if (features().get(ledger::Features::Flag::feature_balance_policy1))
+    {
+        EXECUTIVE_LOG(DEBUG) << LOG_DESC("EVM selfdestruct disable transfer")
+                             << LOG_KV("reason", "feature_balance_policy1 is enabled");
+        return false;
     }
 
-    return h256();
+    auto value = fromEvmC(getBalance(_addr));
+    if (value > 0)
+    {
+        auto callParameters = std::make_unique<CallParameters>(CallParameters::MESSAGE);
+        callParameters->origin = bcos::precompiled::BALANCE_PRECOMPILED_ADDRESS;
+        callParameters->senderAddress = address2HexString(*_addr);
+        callParameters->receiveAddress = address2HexString(*_beneficiary);
+        callParameters->value = value;
+        callParameters->staticCall = staticCall();
+        callParameters->gas = gas();
+
+        auto callResults = m_executive->transferBalance(std::move(callParameters), 0, myAddress());
+        if (callResults->status != (int32_t)TransactionStatus::None)
+        {
+            EXECUTIVE_LOG(ERROR) << LOG_DESC("EVM selfdestruct failed")
+                                 << LOG_KV("type", callResults->type)
+                                 << LOG_KV("status", callResults->status)
+                                 << LOG_KV("message", callResults->message)
+                                 << LOG_KV("subAccount", address2HexString(*_addr))
+                                 << LOG_KV("addAccount", address2HexString(*_beneficiary))
+                                 << LOG_KV("value", value);
+        }
+    }
+    return false;  // just use default
 }
 
-bool HostContext::registerAsset(const std::string& _assetName, const std::string_view& _addr,
-    bool _fungible, uint64_t _total, const std::string& _description)
-{
-    (void)_assetName;
-    (void)_addr;
-    (void)_fungible;
-    (void)_total;
-    (void)_description;
 
-    return true;
-    // auto table = m_tableFactory->openTable(SYS_ASSET_INFO);
-    // if (table->getRow(_assetName)) {
-    //   return false;
-    // }
-    // auto entry = table->newEntry();
-    // entry.setField(SYS_ASSET_NAME, _assetName);
-    // entry.setField(SYS_ASSET_ISSUER, string(_addr));
-    // entry.setField(SYS_ASSET_FUNGIBLE, to_string(_fungible));
-    // entry.setField(SYS_ASSET_TOTAL, to_string(_total));
-    // entry.setField(SYS_ASSET_SUPPLIED, "0");
-    // entry.setField(SYS_ASSET_DESCRIPTION, _description);
-    // auto count = table->setRow(_assetName, entry);
-    // return count == 1;
-}
-
-bool HostContext::issueFungibleAsset(
-    const std::string_view& _to, const std::string& _assetName, uint64_t _amount)
-{
-    (void)_to;
-    (void)_assetName;
-    (void)_amount;
-
-    return true;
-    // auto table = m_tableFactory->openTable(SYS_ASSET_INFO);
-    // auto entry = table->getRow(_assetName);
-    // if (!entry) {
-    //   EXECUTIVE_LOG(WARNING) << "issueFungibleAsset " << _assetName
-    //                          << "is not exist";
-    //   return false;
-    // }
-
-    // auto issuer = std::string(entry->getField(SYS_ASSET_ISSUER));
-    // if (caller() != issuer) {
-    //   EXECUTIVE_LOG(WARNING) << "issueFungibleAsset not issuer of " <<
-    //   _assetName
-    //                          << LOG_KV("issuer", issuer)
-    //                          << LOG_KV("caller", caller());
-    //   return false;
-    // }
-    // // TODO: check supplied is less than total_supply
-    // auto total =
-    // boost::lexical_cast<uint64_t>(entry->getField(SYS_ASSET_TOTAL)); auto
-    // supplied =
-    //     boost::lexical_cast<uint64_t>(entry->getField(SYS_ASSET_SUPPLIED));
-    // if (total - supplied < _amount) {
-    //   EXECUTIVE_LOG(WARNING) << "issueFungibleAsset overflow total supply"
-    //                          << LOG_KV("amount", _amount)
-    //                          << LOG_KV("supplied", supplied)
-    //                          << LOG_KV("total", total);
-    //   return false;
-    // }
-    // // TODO: update supplied
-    // auto updateEntry = table->newEntry();
-    // updateEntry.setField(SYS_ASSET_SUPPLIED, to_string(supplied + _amount));
-    // table->setRow(_assetName, updateEntry);
-    // // TODO: create new tokens
-    // depositFungibleAsset(_to, _assetName, _amount);
-    // return true;
-}
-
-uint64_t HostContext::issueNotFungibleAsset(
-    const std::string_view& _to, const std::string& _assetName, const std::string& _uri)
-{
-    (void)_to;
-    (void)_assetName;
-    (void)_uri;
-    return 0;
-    // // check issuer
-    // auto table = m_tableFactory->openTable(SYS_ASSET_INFO);
-    // auto entry = table->getRow(_assetName);
-    // if (!entry) {
-    //   EXECUTIVE_LOG(WARNING) << "issueNotFungibleAsset " << _assetName
-    //                          << "is not exist";
-    //   return false;
-    // }
-
-    // auto issuer = std::string(entry->getField(SYS_ASSET_ISSUER));
-    // if (caller() != issuer) {
-    //   EXECUTIVE_LOG(WARNING) << "issueNotFungibleAsset not issuer of "
-    //                          << _assetName;
-    //   return false;
-    // }
-    // // check supplied
-    // auto total =
-    // boost::lexical_cast<uint64_t>(entry->getField(SYS_ASSET_TOTAL)); auto
-    // supplied =
-    //     boost::lexical_cast<uint64_t>(entry->getField(SYS_ASSET_SUPPLIED));
-    // if (total - supplied == 0) {
-    //   EXECUTIVE_LOG(WARNING) << "issueNotFungibleAsset overflow total supply"
-    //                          << LOG_KV("supplied", supplied)
-    //                          << LOG_KV("total", total);
-    //   return false;
-    // }
-    // // get asset id and update supplied
-    // auto assetID = supplied + 1;
-    // auto updateEntry = table->newEntry();
-    // updateEntry.setField(SYS_ASSET_SUPPLIED, to_string(assetID));
-    // table->setRow(_assetName, updateEntry);
-
-    // // create new tokens
-    // depositNotFungibleAsset(_to, _assetName, assetID, _uri);
-    // return assetID;
-}
-
-void HostContext::depositFungibleAsset(
-    const std::string_view& _to, const std::string& _assetName, uint64_t _amount)
-{
-    (void)_to;
-    (void)_assetName;
-    (void)_amount;
-    // auto tableName =
-    //     getContractTableName(_to, true, m_blockContext->hashHandler());
-    // auto table = m_tableFactory->openTable(tableName);
-    // if (!table) {
-    //   EXECUTIVE_LOG(DEBUG) << LOG_DESC("depositFungibleAsset createAccount")
-    //                        << LOG_KV("account", _to);
-    //   m_s->setNonce(_to, u256(0));
-    //   table = m_tableFactory->openTable(tableName);
-    // }
-    // auto entry = table->getRow(_assetName);
-    // if (!entry) {
-    //   auto entry = table->newEntry();
-    //   entry.setField("key", _assetName);
-    //   entry.setField("value", to_string(_amount));
-    //   table->setRow(_assetName, entry);
-    //   return;
-    // }
-
-    // auto value = boost::lexical_cast<uint64_t>(entry->getField("value"));
-    // value += _amount;
-    // auto updateEntry = table->newEntry();
-    // updateEntry.setField("value", to_string(value));
-    // table->setRow(_assetName, updateEntry);
-}
-
-void HostContext::depositNotFungibleAsset(const std::string_view& _to,
-    const std::string& _assetName, uint64_t _assetID, const std::string& _uri)
-{
-    (void)_to;
-    (void)_assetName;
-    (void)_assetID;
-    (void)_uri;
-
-    // auto tableName =
-    //     getContractTableName(_to, true, m_blockContext->hashHandler());
-    // auto table = m_tableFactory->openTable(tableName);
-    // if (!table) {
-    //   EXECUTIVE_LOG(DEBUG) << LOG_DESC("depositNotFungibleAsset createAccount")
-    //                        << LOG_KV("account", _to);
-    //   m_s->setNonce(_to, u256(0));
-    //   table = m_tableFactory->openTable(tableName);
-    // }
-    // auto entry = table->getRow(_assetName);
-    // if (!entry) {
-    //   auto entry = table->newEntry();
-    //   entry.setField("value", to_string(_assetID));
-    //   entry.setField("key", _assetName);
-    //   table->setRow(_assetName, entry);
-    // } else {
-    //   auto assetIDs = string(entry->getField("value"));
-    //   if (assetIDs.empty()) {
-    //     assetIDs = to_string(_assetID);
-    //   } else {
-    //     assetIDs = assetIDs + "," + to_string(_assetID);
-    //   }
-    //   auto updateEntry = table->newEntry();
-    //   updateEntry.setField("key", _assetName);
-    //   updateEntry.setField("value", assetIDs);
-    //   table->setRow(_assetName, updateEntry);
-    // }
-    // auto newEntry = table->newEntry();
-    // auto key = _assetName + "-" + to_string(_assetID);
-    // newEntry.setField("key", key);
-    // newEntry.setField("value", _uri);
-    // table->setRow(key, newEntry);
-}
-
-bool HostContext::transferAsset(const std::string_view& _to, const std::string& _assetName,
-    uint64_t _amountOrID, bool _fromSelf)
-{
-    (void)_to;
-    (void)_assetName;
-    (void)_amountOrID;
-    (void)_fromSelf;
-    return true;
-    // // get asset info
-    // auto table = m_tableFactory->openTable(SYS_ASSET_INFO);
-    // auto assetEntry = table->getRow(_assetName);
-    // if (!assetEntry) {
-    //   EXECUTIVE_LOG(WARNING) << "transferAsset " << _assetName << " is not
-    //   exist"; return false;
-    // }
-    // auto fungible =
-    //     boost::lexical_cast<bool>(assetEntry->getField(SYS_ASSET_FUNGIBLE));
-    // auto from = caller();
-    // if (_fromSelf) {
-    //   from = myAddress();
-    // }
-    // auto tableName =
-    //     getContractTableName(from, true, m_blockContext->hashHandler());
-    // table = m_tableFactory->openTable(tableName);
-    // auto entry = table->getRow(_assetName);
-    // if (!entry) {
-    //   EXECUTIVE_LOG(WARNING) << LOG_DESC("transferAsset account does not have")
-    //                          << LOG_KV("asset", _assetName)
-    //                          << LOG_KV("account", from);
-    //   return false;
-    // }
-    // EXECUTIVE_LOG(DEBUG) << LOG_DESC("transferAsset")
-    //                      << LOG_KV("asset", _assetName)
-    //                      << LOG_KV("fungible", fungible)
-    //                      << LOG_KV("account", from);
-    // try {
-    //   if (fungible) {
-    //     auto value = boost::lexical_cast<uint64_t>(entry->getField("value"));
-    //     value -= _amountOrID;
-    //     auto updateEntry = table->newEntry();
-    //     updateEntry.setField("key", _assetName);
-    //     updateEntry.setField("value", to_string(value));
-    //     table->setRow(_assetName, updateEntry);
-    //     depositFungibleAsset(_to, _assetName, _amountOrID);
-    //   } else {
-    //     // TODO: check if from has asset
-    //     auto tokenIDs = entry->getField("value");
-    //     // find id in tokenIDs
-    //     auto tokenID = to_string(_amountOrID);
-    //     vector<string> tokenIDList;
-    //     boost::split(tokenIDList, tokenIDs, boost::is_any_of(","));
-    //     auto it = find(tokenIDList.begin(), tokenIDList.end(), tokenID);
-    //     if (it != tokenIDList.end()) {
-    //       tokenIDList.erase(it);
-    //       auto updateEntry = table->newEntry();
-    //       updateEntry.setField("value", boost::algorithm::join(tokenIDList,
-    //       ",")); table->setRow(_assetName, updateEntry); auto tokenKey =
-    //       _assetName + "-" + tokenID; auto entry = table->getRow(tokenKey);
-    //       auto tokenURI = string(entry->getField("value"));
-    //       // FIXME: how to use remove
-    //       // table->remove(tokenKey);
-    //       depositNotFungibleAsset(_to, _assetName, _amountOrID, tokenURI);
-    //     } else {
-    //       EXECUTIVE_LOG(WARNING)
-    //           << LOG_DESC("transferAsset account does not have")
-    //           << LOG_KV("asset", _assetName) << LOG_KV("account", from);
-    //       return false;
-    //     }
-    //   }
-    // } catch (std::exception &e) {
-    //   EXECUTIVE_LOG(ERROR) << "transferAsset exception"
-    //                        << LOG_KV("what", e.what());
-    //   return false;
-    // }
-
-    // return true;
-}
-
-uint64_t HostContext::getAssetBanlance(
-    const std::string_view& _account, const std::string& _assetName)
-{
-    (void)_account;
-    (void)_assetName;
-    return 0;
-    // auto table = m_tableFactory->openTable(SYS_ASSET_INFO);
-    // auto assetEntry = table->getRow(_assetName);
-    // if (!assetEntry) {
-    //   EXECUTIVE_LOG(WARNING) << "getAssetBanlance " << _assetName
-    //                          << " is not exist";
-    //   return false;
-    // }
-    // auto fungible =
-    //     boost::lexical_cast<bool>(assetEntry->getField(SYS_ASSET_FUNGIBLE));
-    // auto tableName =
-    //     getContractTableName(_account, true, m_blockContext->hashHandler());
-    // table = m_tableFactory->openTable(tableName);
-    // if (!table) {
-    //   return 0;
-    // }
-    // auto entry = table->getRow(_assetName);
-    // if (!entry) {
-    //   return 0;
-    // }
-
-    // if (fungible) {
-    //   return boost::lexical_cast<uint64_t>(entry->getField("value"));
-    // }
-    // // not fungible
-    // auto tokenIDS = entry->getField("value");
-    // uint64_t counts = std::count(tokenIDS.begin(), tokenIDS.end(), ',') + 1;
-    // return counts;
-}
-
-std::string HostContext::getNotFungibleAssetInfo(
-    const std::string_view& _owner, const std::string& _assetName, uint64_t _assetID)
-{
-    (void)_owner;
-    (void)_assetName;
-    (void)_assetID;
-    return {};
-    //   auto tableName =
-    //       getContractTableName(_owner, true, m_blockContext->hashHandler());
-    //   auto table = m_tableFactory->openTable(tableName);
-    //   if (!table) {
-    //     EXECUTIVE_LOG(WARNING)
-    //         << "getNotFungibleAssetInfo failed, account not exist"
-    //         << LOG_KV("account", _owner);
-    //     return "";
-    //   }
-    //   auto assetKey = _assetName + "-" + to_string(_assetID);
-    //   auto entry = table->getRow(assetKey);
-    //   if (!entry) {
-    //     EXECUTIVE_LOG(WARNING) << "getNotFungibleAssetInfo failed"
-    //                            << LOG_KV("account", _owner)
-    //                            << LOG_KV("asset", assetKey);
-    //     return "";
-    //   }
-
-    //   EXECUTIVE_LOG(DEBUG) << "getNotFungibleAssetInfo" << LOG_KV("account",
-    //   _owner)
-    //                        << LOG_KV("asset", _assetName)
-    //                        << LOG_KV("uri", entry->getField("value"));
-    //   return string(entry->getField("value"));
-}
-
-std::vector<uint64_t> HostContext::getNotFungibleAssetIDs(
-    const std::string_view& _account, const std::string& _assetName)
-{
-    (void)_account;
-    (void)_assetName;
-    return std::vector<uint64_t>();
-    //   auto tableName =
-    //       getContractTableName(_account, true, m_blockContext->hashHandler());
-    //   auto table = m_tableFactory->openTable(tableName);
-    //   if (!table) {
-    //     EXECUTIVE_LOG(WARNING) << "getNotFungibleAssetIDs account not exist"
-    //                            << LOG_KV("account", _account);
-    //     return vector<uint64_t>();
-    //   }
-    //   auto entry = table->getRow(_assetName);
-    //   if (!entry) {
-    //     EXECUTIVE_LOG(WARNING) << "getNotFungibleAssetIDs account has none
-    //     asset"
-    //                            << LOG_KV("account", _account)
-    //                            << LOG_KV("asset", _assetName);
-    //     return vector<uint64_t>();
-    //   }
-
-    //   auto tokenIDs = entry->getField("value");
-    //   if (tokenIDs.empty()) {
-    //     EXECUTIVE_LOG(WARNING) << "getNotFungibleAssetIDs account has none
-    //     asset"
-    //                            << LOG_KV("account", _account)
-    //                            << LOG_KV("asset", _assetName);
-    //     return vector<uint64_t>();
-    //   }
-    //   vector<string> tokenIDList;
-    //   boost::split(tokenIDList, tokenIDs, boost::is_any_of(","));
-    //   vector<uint64_t> ret(tokenIDList.size(), 0);
-    //   EXECUTIVE_LOG(DEBUG) << "getNotFungibleAssetIDs"
-    //                        << LOG_KV("account", _account)
-    //                        << LOG_KV("asset", _assetName)
-    //                        << LOG_KV("tokenIDs", tokenIDs);
-    //   for (size_t i = 0; i < tokenIDList.size(); ++i) {
-    //     ret[i] = boost::lexical_cast<uint64_t>(tokenIDList[i]);
-    // return ret;
-}
-}  // namespace executor
-}  // namespace bcos
+}  // namespace bcos::executor

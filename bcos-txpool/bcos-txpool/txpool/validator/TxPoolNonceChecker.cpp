@@ -26,65 +26,48 @@ using namespace bcos::txpool;
 
 bool TxPoolNonceChecker::exists(NonceType const& _nonce)
 {
-    ReadGuard l(x_nonceCache);
-    if (m_nonceCache.count(_nonce))
-    {
-        return true;
-    }
-    return false;
+    return m_nonces.contains(_nonce);
 }
 
-TransactionStatus TxPoolNonceChecker::checkNonce(Transaction::ConstPtr _tx, bool _shouldUpdate)
+TransactionStatus TxPoolNonceChecker::checkNonce(const bcos::protocol::Transaction& _tx)
 {
-    ReadGuard l(x_nonceCache);
-    auto nonce = _tx->nonce();
-    if (m_nonceCache.count(nonce))
+    auto nonce = _tx.nonce();
+
+    if (m_nonces.contains(nonce))
     {
         return TransactionStatus::NonceCheckFail;
-    }
-    if (_shouldUpdate)
-    {
-        m_nonceCache.insert(nonce);
     }
     return TransactionStatus::None;
 }
 
 void TxPoolNonceChecker::insert(NonceType const& _nonce)
 {
-    ReadGuard l(x_nonceCache);
-    m_nonceCache.insert(_nonce);
+    NonceSet::WriteAccessor accessor;
+    m_nonces.insert(accessor, _nonce);
 }
 
-void TxPoolNonceChecker::batchInsert(BlockNumber, NonceListPtr _nonceList)
+void TxPoolNonceChecker::batchInsert(BlockNumber /*_batchId*/, NonceListPtr const& _nonceList)
 {
-    ReadGuard l(x_nonceCache);
-    for (auto const& nonce : *_nonceList)
-    {
-        m_nonceCache.insert(nonce);
-    }
+    m_nonces.batchInsert(*_nonceList);
 }
 
 void TxPoolNonceChecker::remove(NonceType const& _nonce)
 {
-    if (m_nonceCache.count(_nonce))
+    NonceSet::WriteAccessor accessor;
+    if (m_nonces.find(accessor, _nonce))
     {
-        m_nonceCache.unsafe_erase(_nonce);
+        m_nonces.remove(accessor);
     }
 }
 
 void TxPoolNonceChecker::batchRemove(NonceList const& _nonceList)
 {
-    WriteGuard l(x_nonceCache);
-    for (auto const& nonce : _nonceList)
-    {
-        remove(nonce);
-    }
+    m_nonces.batchRemove<decltype(_nonceList), false>(_nonceList);
 }
 
-void TxPoolNonceChecker::batchRemove(
-    tbb::concurrent_set<bcos::protocol::NonceType> const& _nonceList)
+void TxPoolNonceChecker::batchRemove(tbb::concurrent_unordered_set<bcos::protocol::NonceType,
+    std::hash<bcos::protocol::NonceType>> const& _nonceList)
 {
-    WriteGuard l(x_nonceCache);
     for (auto const& nonce : _nonceList)
     {
         remove(nonce);
